@@ -66,6 +66,17 @@ class WebFlowTests(unittest.TestCase):
         self.assertTrue(Path(download).is_file())
         self.assertEqual(Path(download).parent, WEB_CACHE)
 
+    def test_empty_optional_textboxes_do_not_block_processing(self) -> None:
+        updates = list(run_ui(
+            str(self.video), None, self.temp.name, "auto", 3,
+            False, False, True, False, 0.1, 0.65, 0.9, 0.98,
+            None, False, None, None, None,
+        ))
+        status, logs, _, download = updates[-1]
+        self.assertIn("1 hoàn thành", status)
+        self.assertNotIn("Lỗi cấu hình", logs)
+        self.assertTrue(Path(download).is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

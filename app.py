@@ -54,11 +54,16 @@ def _path(value: str) -> Path:
     return (path if path.is_absolute() else ROOT / path).resolve()
 
 
-def _source(path_text: str, uploaded: str | None) -> Path:
+def _clean_text(value: str | None) -> str:
+    """Gradio sends None for some empty textboxes."""
+    return value.strip() if value is not None else ""
+
+
+def _source(path_text: str | None, uploaded: str | None) -> Path:
     if uploaded:
         path = Path(uploaded).resolve()
-    elif path_text.strip():
-        path = _path(path_text.strip())
+    elif _clean_text(path_text):
+        path = _path(_clean_text(path_text))
     else:
         raise ValueError("Hãy nhập đường dẫn video/thư mục hoặc tải lên một video.")
     if not path.exists():
@@ -71,20 +76,21 @@ def _roi(auto: bool, x_min: float, y_min: float, x_max: float, y_max: float) -> 
 
 
 def _config(
-    path_text: str, uploaded: str | None, output_text: str, language: str, fps: int,
+    path_text: str | None, uploaded: str | None, output_text: str | None, language: str, fps: int,
     recursive: bool, preserve: bool, overwrite: bool, auto_roi: bool,
     x_min: float, y_min: float, x_max: float, y_max: float,
-    watermark_text: str, llm_enabled: bool, llm_base_url: str,
-    llm_api_key: str, llm_model: str,
+    watermark_text: str | None, llm_enabled: bool, llm_base_url: str | None,
+    llm_api_key: str | None, llm_model: str | None,
 ) -> PipelineConfig:
-    if not output_text.strip():
+    output_value = _clean_text(output_text)
+    if not output_value:
         raise ValueError("Hãy nhập thư mục đầu ra.")
     roi_cfg = DEFAULTS.get("roi", {})
     srt_cfg = DEFAULTS.get("srt", {})
     llm_cfg = DEFAULTS.get("llm", {})
-    terms = tuple(part.strip() for part in watermark_text.split(",") if part.strip())
+    terms = tuple(part.strip() for part in _clean_text(watermark_text).split(",") if part.strip())
     return PipelineConfig(
-        input_path=_source(path_text, uploaded), output_dir=_path(output_text.strip()),
+        input_path=_source(path_text, uploaded), output_dir=_path(output_value),
         language=language, fps=float(fps), recursive=recursive,
         preserve_subfolders=preserve, overwrite=overwrite, auto_roi=auto_roi,
         manual_roi=_roi(auto_roi, x_min, y_min, x_max, y_max),
@@ -104,9 +110,9 @@ def _config(
             watermark_terms=terms,
         ),
         llm=LLMConfig(
-            enabled=llm_enabled, base_url=llm_base_url.strip() or None,
-            api_key=llm_api_key.strip() or os.getenv("HARDSUB_LLM_API_KEY") or None,
-            model=llm_model.strip() or None,
+            enabled=llm_enabled, base_url=_clean_text(llm_base_url) or None,
+            api_key=_clean_text(llm_api_key) or os.getenv("HARDSUB_LLM_API_KEY") or None,
+            model=_clean_text(llm_model) or None,
             batch_size=llm_cfg.get("batch_size", 30),
             timeout_seconds=llm_cfg.get("timeout_seconds", 90),
         ),
@@ -115,13 +121,13 @@ def _config(
 
 
 def _detect_preview(
-    path_text: str, uploaded: str | None, output_text: str, auto_roi: bool,
+    path_text: str | None, uploaded: str | None, output_text: str | None, auto_roi: bool,
     x_min: float, y_min: float, x_max: float, y_max: float,
 ) -> tuple[object, Path]:
     source = _source(path_text, uploaded)
     if not source.is_file():
         raise ValueError("Ảnh xem trước cần một tệp video, không phải thư mục.")
-    output = _path(output_text.strip() or "output")
+    output = _path(_clean_text(output_text) or "output")
     manual = _roi(auto_roi, x_min, y_min, x_max, y_max)
     engine = OCREngine(
         prefer_gpu=DEFAULTS.get("ocr", {}).get("prefer_gpu", True),
@@ -144,7 +150,7 @@ def _detect_preview(
 
 
 def preview_roi(
-    path_text: str, uploaded: str | None, output_text: str, auto_roi: bool,
+    path_text: str | None, uploaded: str | None, output_text: str | None, auto_roi: bool,
     x_min: float, y_min: float, x_max: float, y_max: float,
 ) -> tuple[str | None, str]:
     """Render one preview before committing to full video OCR."""
@@ -157,7 +163,7 @@ def preview_roi(
 
 
 def preview_roi_editor(
-    path_text: str, uploaded: str | None, output_text: str, auto_roi: bool,
+    path_text: str | None, uploaded: str | None, output_text: str | None, auto_roi: bool,
     x_min: float, y_min: float, x_max: float, y_max: float,
 ) -> tuple[dict | object, str, float | object, float | object, float | object, float | object]:
     try:
@@ -189,11 +195,11 @@ def roi_from_sliders(value: dict, x_min: float, y_min: float, x_max: float, y_ma
 
 
 def run_ui(
-    path_text: str, uploaded: str | None, output_text: str, language: str, fps: int,
+    path_text: str | None, uploaded: str | None, output_text: str | None, language: str, fps: int,
     recursive: bool, preserve: bool, overwrite: bool, auto_roi: bool,
     x_min: float, y_min: float, x_max: float, y_max: float,
-    watermark_text: str, llm_enabled: bool, llm_base_url: str,
-    llm_api_key: str, llm_model: str, progress: gr.Progress = gr.Progress(),
+    watermark_text: str | None, llm_enabled: bool, llm_base_url: str | None,
+    llm_api_key: str | None, llm_model: str | None, progress: gr.Progress = gr.Progress(),
 ) -> Iterator[tuple[str, str, str | None, str | None]]:
     """Stream live events from the blocking pipeline into Gradio outputs."""
     try:
