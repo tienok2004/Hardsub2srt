@@ -1,0 +1,14 @@
+services:
+  hardsub2srt:
+    environment:
+      HARDSUB_WEB_USER: ${HARDSUB_WEB_USER:?Set HARDSUB_WEB_USER in .env}
+      HARDSUB_WEB_PASSWORD: ${HARDSUB_WEB_PASSWORD:?Set HARDSUB_WEB_PASSWORD in .env}
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in .env}
+    depends_on:
+      - hardsub2srt

@@ -1,0 +1,12 @@
+.tools/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+input/
+output/
+web_cache/
+.env
+dist/
+

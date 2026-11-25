@@ -1,0 +1,25 @@
+services:
+  hardsub2srt:
+    build: .
+    image: hardsub2srt:gpu
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7860:7860"
+    environment:
+      HARDSUB_INPUT_DIR: /input
+      HARDSUB_OUTPUT_DIR: /output
+      HARDSUB_WEB_USER: ${HARDSUB_WEB_USER:-}
+      HARDSUB_WEB_PASSWORD: ${HARDSUB_WEB_PASSWORD:-}
+      GRADIO_ANALYTICS_ENABLED: "False"
+    volumes:
+      - ./input:/input
+      - ./output:/output
+      - ./config.yaml:/app/config.yaml:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
