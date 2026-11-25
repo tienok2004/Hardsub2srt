@@ -141,8 +141,11 @@ def _best_roi(
     return ROI(x1, y1, x2, y2), len(best.frame_ids)
 
 
-def _preview(frame: SampledFrame, roi: ROI, path: Path) -> None:
+def _preview(frame: SampledFrame, roi: ROI, path: Path, raw_path: Path | None = None) -> None:
     image = Image.frombytes("RGB", (frame.width, frame.height), frame.rgb24)
+    if raw_path is not None:
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(raw_path, "JPEG", quality=90)
     draw = ImageDraw.Draw(image)
     draw.rectangle(roi.pixels(frame.width, frame.height), outline=(0, 255, 0), width=max(2, frame.width // 300))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,6 +158,7 @@ def detect_roi(
     *,
     manual: ROI | None = None,
     preview_path: str | Path = "roi_preview.jpg",
+    raw_preview_path: str | Path | None = None,
     sample_frames: int = 30,
     max_sample_frames: int = 90,
     probe_max_width: int = 960,
@@ -170,6 +174,7 @@ def detect_roi(
         raise ValueError("padding_ratio hoặc probe_max_width không hợp lệ")
     info: VideoMetadata = probe_video(video, ffprobe=ffprobe)
     destination = Path(preview_path).expanduser().resolve()
+    raw_destination = Path(raw_preview_path).expanduser().resolve() if raw_preview_path else None
 
     def read_at(timestamp: float) -> SampledFrame:
         # Container duration may extend beyond the final decodable frame.
@@ -180,7 +185,7 @@ def detect_roi(
 
     if manual is not None:
         frame = read_at(info.duration_seconds / 2)
-        _preview(frame, manual, destination)
+        _preview(frame, manual, destination, raw_destination)
         return ROIResult(manual, "manual", 0, 1, destination, "Đã dùng ROI thủ công.")
 
     observations: list[tuple[int, float, tuple[float, float, float, float], bool]] = []
@@ -229,7 +234,7 @@ def detect_roi(
         roi, support = found
         mode = "auto"
         message = f"ROI tự động được hỗ trợ bởi {support} khung hình."
-    _preview(preview_frame, roi, destination)
+    _preview(preview_frame, roi, destination, raw_destination)
     return ROIResult(roi, mode, support, checked, destination, message)
 
 

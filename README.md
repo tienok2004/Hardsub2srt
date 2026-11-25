@@ -106,14 +106,17 @@ Set-Location 'D:\Tien data\Soft\Hardsub2srt'
 Trên Windows, trình duyệt sẽ tự mở `http://127.0.0.1:7860`. Nếu không tự mở,
 truy cập `http://localhost:7860` bằng tay. Dán đường dẫn video/thư mục trên máy đang chạy ứng
 dụng hoặc tải lên một video. Nút **Xem trước ROI** tạo ảnh khoanh vùng trước khi
-chạy OCR; nút **Bắt đầu xử lý** cập nhật tiến độ và nhật ký. Với một video, giao
+chạy OCR. Trên ảnh, kéo bên trong khung xanh để di chuyển hoặc kéo góc/cạnh để
+đổi kích thước. Bốn ô tọa độ cập nhật theo khung; sửa các ô cũng làm khung đổi
+ngay mà không phải quét ROI lại. Mọi chỉnh sửa chuyển sang ROI thủ công cho lần
+xử lý tiếp theo. Nút **Bắt đầu xử lý** cập nhật tiến độ và nhật ký. Với một video, giao
 diện hiển thị tệp SRT để tải. Nếu chọn thư mục đầu ra khác, tệp kết quả vẫn
 được lưu ở đó; bản phục vụ tải xuống được sao chép vào `web_cache/`.
 
 ## Linux VPS có NVIDIA GPU
 
-Yêu cầu driver NVIDIA hoạt động (`nvidia-smi`), CUDA 12.8, cuDNN 9, Python
-3.10+ và FFmpeg. Trên Ubuntu 24.04, sau khi chuẩn bị driver/CUDA/cuDNN:
+Yêu cầu driver NVIDIA hoạt động (`nvidia-smi`), Python 3.11+ và FFmpeg.
+`requirements-gpu.txt` cài kèm thư viện CUDA 12/cuDNN 9 qua pip. Trên Ubuntu 24.04:
 
 ```bash
 sudo apt-get update
@@ -126,6 +129,10 @@ python3 -m venv .venv
 
 `requirements-gpu.txt` ghim ONNX Runtime GPU 1.26.0 cho CUDA 12.8/cuDNN 9.
 Trên VPS có phiên bản Python khác, thay `python3.12` trong đường dẫn mô hình.
+Kết quả cần thấy là `Phiên CUDA: đã xác minh` và `Provider được chọn:
+CUDAExecutionProvider`. Chỉ thấy `CUDA provider: có` chưa đủ vì thư viện CUDA có
+thể chưa nạp được; khi đó OCR tự dùng CPU. Để kiểm tra bằng mã thoát, thêm
+`--require-cuda` vào lệnh kiểm tra.
 Web UI lắng nghe `0.0.0.0:7860`; có thể truy cập qua SSH port forwarding.
 Đặt `HARDSUB_WEB_USER` và `HARDSUB_WEB_PASSWORD` để bật xác thực giao diện.
 
@@ -153,8 +160,8 @@ dung lượng mỗi yêu cầu tải lên theo gói dịch vụ (Free/Pro: 100 M
 
 ### Phiên Vast.ai thông thường (container, không dùng Docker Compose)
 
-Ưu tiên image Ubuntu 24.04 có CUDA 12.8 và cuDNN 9 phù hợp với
-`requirements-gpu.txt`, rồi mở SSH vào
+Ưu tiên image Ubuntu 24.04 có driver NVIDIA hoạt động (`nvidia-smi`);
+thư viện CUDA/cuDNN sẽ được cài trong `.venv` qua `requirements-gpu.txt`. Mở SSH vào
 instance. Trên Windows, tạo gói nguồn chỉ gồm mã và cấu hình cần thiết:
 
 ```powershell
@@ -180,8 +187,10 @@ cd ~/hardsub2srt
 bash setup-vast.sh
 ```
 
-Script cài gói hệ thống, môi trường Python GPU và `cloudflared`, sau đó kiểm
-tra FFmpeg và phiên CUDA với mô hình OCR thật. Có thể chạy lại nếu quá trình
+Script cài gói hệ thống, môi trường Python GPU cùng thư viện CUDA/cuDNN qua pip
+và `cloudflared`, sau đó kiểm tra FFmpeg và phiên CUDA với mô hình OCR thật.
+Nếu kiểm tra CUDA thất bại, script báo rõ OCR đang dùng CPU; Web UI vẫn chạy.
+Có thể chạy lại nếu quá trình
 cài bị ngắt. `cloudflared` nằm trong `.tools/`; nếu chỉ muốn cài riêng công cụ
 này, chạy `bash install-cloudflared.sh` mà không cần quyền root. Đặt thông tin
 đăng nhập và token trong phiên shell (lệnh `read` tránh ghi bí mật vào lịch sử

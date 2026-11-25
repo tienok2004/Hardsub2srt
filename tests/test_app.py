@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app import WEB_CACHE, preview_roi, run_ui
+from app import WEB_CACHE, preview_roi, preview_roi_editor, roi_from_image, roi_from_sliders, run_ui
 
 
 class WebFlowTests(unittest.TestCase):
@@ -37,6 +37,21 @@ class WebFlowTests(unittest.TestCase):
         self.assertIsNotNone(image)
         self.assertTrue(Path(image).is_file())
         self.assertEqual(Path(image).parent, WEB_CACHE)
+
+    def test_editor_preview_and_coordinate_sync(self) -> None:
+        editor, status, x1, y1, x2, y2 = preview_roi_editor(
+            str(self.video), None, self.temp.name, False, 0.1, 0.65, 0.9, 0.98,
+        )
+        self.assertIn("ROI thủ công", status)
+        self.assertTrue(editor["src"].startswith("data:image/jpeg;base64,"))
+        self.assertGreater(editor["display_width"], 0)
+        self.assertEqual([x1, y1, x2, y2], editor["roi"])
+
+        updated, auto, _ = roi_from_sliders(editor, 0.2, 0.5, 0.8, 0.9)
+        self.assertFalse(auto)
+        self.assertEqual(updated["roi"], [0.2, 0.5, 0.8, 0.9])
+        self.assertEqual(updated["src"], editor["src"])
+        self.assertEqual(roi_from_image(updated)[:5], (False, 0.2, 0.5, 0.8, 0.9))
 
     def test_single_video_flow_returns_download(self) -> None:
         updates = list(run_ui(

@@ -48,6 +48,16 @@ def _onnxruntime() -> Any | None:
         return None
 
 
+def _preload_cuda_libraries(ort: Any) -> None:
+    """Load CUDA/cuDNN from the venv before ONNX Runtime opens its CUDA provider."""
+    preload = getattr(ort, "preload_dlls", None)
+    if callable(preload):
+        try:
+            preload()
+        except (OSError, RuntimeError) as exc:
+            LOGGER.warning("Không nạp trước được thư viện CUDA/cuDNN: %s", exc)
+
+
 def inspect_gpu(model_path: str | Path | None = None, *, nvidia_smi: str = "nvidia-smi") -> GpuStatus:
     """Check device/provider availability; optionally prove CUDA session startup.
 
@@ -60,6 +70,7 @@ def inspect_gpu(model_path: str | Path | None = None, *, nvidia_smi: str = "nvid
     initialized = False
     if available and model_path is not None:
         try:
+            _preload_cuda_libraries(ort)
             session = ort.InferenceSession(
                 str(model_path), providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
             )
@@ -84,6 +95,7 @@ def create_ort_session(model_path: str | Path, *, prefer_gpu: bool = True) -> An
         raise RuntimeError("Cần cài onnxruntime hoặc onnxruntime-gpu để chạy OCR.")
     if prefer_gpu and "CUDAExecutionProvider" in ort.get_available_providers():
         try:
+            _preload_cuda_libraries(ort)
             session = ort.InferenceSession(
                 str(model_path), providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
             )
@@ -103,7 +115,10 @@ def main() -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Kiểm tra khả năng chạy OCR bằng NVIDIA GPU")
     parser.add_argument("--model", type=Path, help="Mô hình ONNX để thử khởi tạo CUDA thực tế")
+    parser.add_argument("--require-cuda", action="store_true", help="Trả mã lỗi nếu không khởi tạo được phiên CUDA")
     args = parser.parse_args()
+    if args.require_cuda and args.model is None:
+        parser.error("--require-cuda cần --model")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     status = inspect_gpu(args.model)
     print(f"Thiết bị NVIDIA: {status.device_name or 'không phát hiện'}")
@@ -111,7 +126,7 @@ def main() -> int:
     print(f"CUDA provider: {'có' if status.cuda_provider_available else 'không'}")
     print(f"Phiên CUDA: {'đã xác minh' if status.cuda_session_initialized else 'chưa xác minh'}")
     print(f"Provider được chọn: {status.active_provider}")
-    return 0
+    return 0 if not args.require_cuda or status.cuda_session_initialized else 1
 
 
 if __name__ == "__main__":

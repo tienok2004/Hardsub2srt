@@ -24,8 +24,8 @@ export DEBIAN_FRONTEND=noninteractive
   python3 python3-venv python3-pip ffmpeg libgl1 libgomp1 libglib2.0-0 \
   zlib1g ca-certificates curl tmux
 
-python3 -c 'import sys; print("Python:", sys.version.split()[0]); sys.exit(0 if sys.version_info >= (3, 10) else 1)' || {
-  echo "Cần Python 3.10 trở lên. Hãy chọn image Vast.ai mới hơn." >&2
+python3 -c 'import sys; print("Python:", sys.version.split()[0]); sys.exit(0 if sys.version_info >= (3, 11) else 1)' || {
+  echo "Cần Python 3.11 trở lên cho ONNX Runtime GPU 1.26. Hãy chọn image Vast.ai mới hơn." >&2
   exit 1
 }
 
@@ -47,7 +47,9 @@ fi
 
 model_path="$(.venv/bin/python -c 'from pathlib import Path; import rapidocr; print(Path(rapidocr.__file__).parent / "models" / "PP-OCRv6_det_small.onnx")')"
 if [[ -f "$model_path" ]]; then
-  .venv/bin/python -m core.gpu --model "$model_path"
+  if ! .venv/bin/python -m core.gpu --model "$model_path" --require-cuda; then
+    echo "Cảnh báo: OCR vẫn dùng CPU. Xem lỗi CUDA ở trên và kiểm tra driver NVIDIA của instance." >&2
+  fi
 else
   echo "Chưa có mô hình OCR mặc định để thử phiên CUDA; ứng dụng sẽ tải khi chạy lần đầu." >&2
 fi

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import base64
 import hashlib
 import queue
 import shutil
@@ -12,11 +13,13 @@ from typing import Iterator
 
 import gradio as gr
 import yaml
+from PIL import Image
 
 from core.llm_refiner import LLMConfig
 from core.ocr_engine import OCREngine
 from core.pipeline import BatchSummary, PipelineConfig, ProgressEvent, run_batch
 from core.roi_detector import ROI, detect_roi
+from core.roi_editor import HTML_TEMPLATE, CSS_TEMPLATE, JS_ON_LOAD
 from core.srt_builder import BuilderConfig
 
 ROOT = Path(__file__).resolve().parent
@@ -111,35 +114,78 @@ def _config(
     )
 
 
+def _detect_preview(
+    path_text: str, uploaded: str | None, output_text: str, auto_roi: bool,
+    x_min: float, y_min: float, x_max: float, y_max: float,
+) -> tuple[object, Path]:
+    source = _source(path_text, uploaded)
+    if not source.is_file():
+        raise ValueError("Ảnh xem trước cần một tệp video, không phải thư mục.")
+    output = _path(output_text.strip() or "output")
+    manual = _roi(auto_roi, x_min, y_min, x_max, y_max)
+    engine = OCREngine(
+        prefer_gpu=DEFAULTS.get("ocr", {}).get("prefer_gpu", True),
+        model_size=DEFAULTS.get("ocr", {}).get("model_size", "small"),
+    ) if auto_roi else None
+    roi_cfg = DEFAULTS.get("roi", {})
+    raw_path = output / f"{source.stem}_roi_frame.jpg"
+    result = detect_roi(
+        source, engine, manual=manual,
+        preview_path=output / f"{source.stem}_roi_preview.jpg",
+        raw_preview_path=raw_path,
+        sample_frames=roi_cfg.get("sample_frames", 30),
+        max_sample_frames=roi_cfg.get("max_sample_frames", 90),
+        probe_max_width=roi_cfg.get("probe_max_width", 960),
+        minimum_support_frames=roi_cfg.get("minimum_support_frames", 2),
+        padding_ratio=roi_cfg.get("padding_ratio", 0.03),
+        ffmpeg=_tool("ffmpeg"), ffprobe=_tool("ffprobe"),
+    )
+    return result, raw_path
+
+
 def preview_roi(
     path_text: str, uploaded: str | None, output_text: str, auto_roi: bool,
     x_min: float, y_min: float, x_max: float, y_max: float,
 ) -> tuple[str | None, str]:
     """Render one preview before committing to full video OCR."""
     try:
-        source = _source(path_text, uploaded)
-        if not source.is_file():
-            raise ValueError("Ảnh xem trước cần một tệp video, không phải thư mục.")
-        output = _path(output_text.strip() or "output")
-        manual = _roi(auto_roi, x_min, y_min, x_max, y_max)
-        engine = OCREngine(
-            prefer_gpu=DEFAULTS.get("ocr", {}).get("prefer_gpu", True),
-            model_size=DEFAULTS.get("ocr", {}).get("model_size", "small"),
-        ) if auto_roi else None
-        roi_cfg = DEFAULTS.get("roi", {})
-        result = detect_roi(
-            source, engine, manual=manual,
-            preview_path=output / f"{source.stem}_roi_preview.jpg",
-            sample_frames=roi_cfg.get("sample_frames", 30),
-            max_sample_frames=roi_cfg.get("max_sample_frames", 90),
-            probe_max_width=roi_cfg.get("probe_max_width", 960),
-            minimum_support_frames=roi_cfg.get("minimum_support_frames", 2),
-            padding_ratio=roi_cfg.get("padding_ratio", 0.03),
-            ffmpeg=_tool("ffmpeg"), ffprobe=_tool("ffprobe"),
-        )
+        result, _ = _detect_preview(path_text, uploaded, output_text, auto_roi,
+                                    x_min, y_min, x_max, y_max)
         return _public_copy(result.preview_path), f"{result.message} ROI: {result.roi}"
     except Exception as exc:
         return None, f"Lỗi xem trước ROI: {exc}"
+
+
+def preview_roi_editor(
+    path_text: str, uploaded: str | None, output_text: str, auto_roi: bool,
+    x_min: float, y_min: float, x_max: float, y_max: float,
+) -> tuple[dict | object, str, float | object, float | object, float | object, float | object]:
+    try:
+        result, raw_path = _detect_preview(path_text, uploaded, output_text, auto_roi,
+                                           x_min, y_min, x_max, y_max)
+        src = "data:image/jpeg;base64," + base64.b64encode(raw_path.read_bytes()).decode("ascii")
+        with Image.open(raw_path) as frame:
+            width, height = frame.size
+        display_width = round(min(width, 960, 700 * width / height))
+        coords = [result.roi.x_min, result.roi.y_min, result.roi.x_max, result.roi.y_max]
+        return {"src": src, "roi": coords, "display_width": display_width}, f"{result.message} Kéo khung xanh hoặc các góc để chỉnh ROI.", *coords
+    except Exception as exc:
+        return gr.skip(), f"Lỗi xem trước ROI: {exc}", *(gr.skip() for _ in range(4))
+
+
+def roi_from_image(value: dict) -> tuple[bool, float, float, float, float, str]:
+    roi = ROI(*(float(part) for part in value["roi"]))
+    return False, roi.x_min, roi.y_min, roi.x_max, roi.y_max, "Đã chọn ROI thủ công trên ảnh."
+
+
+def roi_from_sliders(value: dict, x_min: float, y_min: float, x_max: float, y_max: float):
+    try:
+        roi = ROI(x_min, y_min, x_max, y_max)
+    except ValueError as exc:
+        return gr.skip(), False, f"ROI chưa hợp lệ: {exc}"
+    if not value or not value.get("src"):
+        return gr.skip(), False, "Đã cập nhật tọa độ. Bấm Xem trước ROI để hiện ảnh."
+    return {**value, "roi": [roi.x_min, roi.y_min, roi.x_max, roi.y_max]}, False, "Đã cập nhật khung ROI trên ảnh."
 
 
 def run_ui(
@@ -244,14 +290,20 @@ def build_app() -> gr.Blocks:
             overwrite = gr.Checkbox(value=False, label="Ghi đè SRT đã có")
         with gr.Accordion("Vùng phụ đề (ROI)", open=True):
             auto_roi = gr.Checkbox(value=True, label="Tự động phát hiện ROI")
-            gr.Markdown("Tắt tự động để dùng bốn tỷ lệ ROI thủ công (0–1).")
+            gr.Markdown("Bấm xem trước, rồi kéo khung xanh hoặc các góc ngay trên ảnh. Sửa tọa độ cũng cập nhật khung; cả hai cách đều chuyển sang ROI thủ công.")
             with gr.Row():
                 x_min = gr.Slider(0, 1, value=0, step=0.01, label="X nhỏ nhất")
                 y_min = gr.Slider(0, 1, value=0.65, step=0.01, label="Y nhỏ nhất")
                 x_max = gr.Slider(0, 1, value=1, step=0.01, label="X lớn nhất")
                 y_max = gr.Slider(0, 1, value=1, step=0.01, label="Y lớn nhất")
             preview_button = gr.Button("Xem trước ROI")
-            preview_image = gr.Image(label="Ảnh xem trước ROI", interactive=False, height=420)
+            roi_editor = gr.HTML(
+                value={"src": "", "roi": [0, 0.65, 1, 1], "display_width": 0},
+                html_template=HTML_TEMPLATE, css_template=CSS_TEMPLATE,
+                js_on_load=JS_ON_LOAD, label="Ảnh xem trước ROI",
+            )
+            with gr.Accordion("Ảnh ROI khi xử lý", open=False):
+                preview_image = gr.Image(label="ROI đã dùng", interactive=False, height=420)
         watermark_terms = gr.Textbox(value=", ".join(DEFAULTS.get("srt", {}).get("watermark_terms", [])),
                                     label="Từ khóa watermark cần bỏ qua (ngăn cách bằng dấu phẩy)",
                                     placeholder="Ví dụ: tên logo")
@@ -266,10 +318,20 @@ def build_app() -> gr.Blocks:
         download = gr.File(label="Tải tệp SRT (chạy một video)", interactive=False)
 
         preview_button.click(
-            preview_roi,
+            preview_roi_editor,
             inputs=[input_path, upload, output_dir, auto_roi, x_min, y_min, x_max, y_max],
-            outputs=[preview_image, status],
+            outputs=[roi_editor, status, x_min, y_min, x_max, y_max],
         )
+        roi_editor.submit(
+            roi_from_image, inputs=[roi_editor],
+            outputs=[auto_roi, x_min, y_min, x_max, y_max, status],
+        )
+        for slider in (x_min, y_min, x_max, y_max):
+            slider.input(
+                roi_from_sliders,
+                inputs=[roi_editor, x_min, y_min, x_max, y_max],
+                outputs=[roi_editor, auto_roi, status], queue=False,
+            )
         run_button.click(
             run_ui,
             inputs=[input_path, upload, output_dir, language, fps, recursive, preserve,
@@ -287,8 +349,9 @@ if __name__ == "__main__":
     auth = (user, password) if user and password else None
     local_windows = os.name == "nt"
     server_name = os.getenv("HARDSUB_WEB_HOST") or ("127.0.0.1" if local_windows else "0.0.0.0")
+    server_port = int(os.getenv("HARDSUB_WEB_PORT", "7860"))
     build_app().queue(default_concurrency_limit=1).launch(
         server_name=server_name,
-        server_port=7860, inbrowser=local_windows, auth=auth,
+        server_port=server_port, inbrowser=local_windows, auth=auth,
         allowed_paths=[str(WEB_CACHE)], show_error=True,
     )
