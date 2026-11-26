@@ -16,7 +16,11 @@ class GpuTests(unittest.TestCase):
 
         def inference_session(*args, **kwargs):
             calls.append("session")
-            return SimpleNamespace(get_providers=lambda: ["CUDAExecutionProvider"])
+            return SimpleNamespace(
+                get_providers=lambda: ["CUDAExecutionProvider"],
+                get_inputs=lambda: [],
+                run=lambda *_: calls.append("run"),
+            )
 
         ort = SimpleNamespace(
             get_available_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
@@ -27,7 +31,7 @@ class GpuTests(unittest.TestCase):
             status = gpu.inspect_gpu("model.onnx")
 
         self.assertTrue(status.cuda_session_initialized)
-        self.assertEqual(calls, ["preload", "session"])
+        self.assertEqual(calls, ["preload", "session", "run"])
 
 
 if __name__ == "__main__":

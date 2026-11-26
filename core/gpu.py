@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import logging
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -48,8 +49,58 @@ def _onnxruntime() -> Any | None:
         return None
 
 
+_DLL_DIRS_ADDED = False
+
+
+def _add_nvidia_dll_dirs() -> None:
+    """Expose pip-installed CUDA/cuDNN ``bin`` folders to the Windows DLL loader.
+
+    ``preload_dlls`` loads ``cudnn64_9.dll`` itself, but cuDNN 9 opens its
+    sub-libraries (``cudnn_engines_*``, ``cudnn_cnn64_9`` ...) later by name. Without
+    their folder on the search path the first convolution fails with
+    ``CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED`` and ONNX Runtime drops to CPU.
+    """
+    global _DLL_DIRS_ADDED
+    if _DLL_DIRS_ADDED or os.name != "nt":
+        return
+    _DLL_DIRS_ADDED = True
+    for site_dir in map(Path, sys.path):
+        nvidia = site_dir / "nvidia"
+        if not nvidia.is_dir():
+            continue
+        for bin_dir in sorted(nvidia.glob("*/bin")):
+            os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+            try:
+                os.add_dll_directory(str(bin_dir))
+            except OSError:
+                pass
+        return
+
+
+def _dummy_inputs(session: Any) -> dict[str, Any]:
+    import numpy as np
+
+    feeds = {}
+    for item in session.get_inputs():
+        shape = [dim if isinstance(dim, int) and dim > 0 else (1 if index == 0 else 64)
+                 for index, dim in enumerate(item.shape)]
+        feeds[item.name] = np.zeros(shape, dtype=np.float32)
+    return feeds
+
+
+def _runs_on_cuda(ort: Any, model_path: str | Path) -> bool:
+    """Run one inference on CUDA only; session creation alone can succeed while
+    the first convolution still fails inside cuDNN."""
+    session = ort.InferenceSession(str(model_path), providers=["CUDAExecutionProvider"])
+    if "CUDAExecutionProvider" not in session.get_providers():
+        return False
+    session.run(None, _dummy_inputs(session))
+    return True
+
+
 def _preload_cuda_libraries(ort: Any) -> None:
     """Load CUDA/cuDNN from the venv before ONNX Runtime opens its CUDA provider."""
+    _add_nvidia_dll_dirs()
     preload = getattr(ort, "preload_dlls", None)
     if callable(preload):
         try:
@@ -71,10 +122,7 @@ def inspect_gpu(model_path: str | Path | None = None, *, nvidia_smi: str = "nvid
     if available and model_path is not None:
         try:
             _preload_cuda_libraries(ort)
-            session = ort.InferenceSession(
-                str(model_path), providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
-            )
-            initialized = "CUDAExecutionProvider" in session.get_providers()
+            initialized = _runs_on_cuda(ort, model_path)
         except Exception as exc:  # CUDA DLL/model failures vary across ORT versions.
             LOGGER.warning("Không khởi tạo được phiên ONNX Runtime CUDA: %s", exc)
 
