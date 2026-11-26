@@ -8,6 +8,7 @@ import hashlib
 import queue
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -26,6 +27,12 @@ ROOT = Path(__file__).resolve().parent
 WEB_CACHE = ROOT / "web_cache"
 DEFAULTS = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
 VIDEO_TYPES = [".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"]
+UI_REFRESH_SECONDS = 1.0
+
+
+def _progress_bar(fraction: float, width: int = 20) -> str:
+    filled = round(max(0.0, min(1.0, fraction)) * width)
+    return f"[{'█' * filled}{'░' * (width - filled)}] {fraction * 100:5.1f}%"
 
 
 def _public_copy(path: Path) -> str:
@@ -199,7 +206,7 @@ def run_ui(
     recursive: bool, preserve: bool, overwrite: bool, auto_roi: bool,
     x_min: float, y_min: float, x_max: float, y_max: float,
     watermark_text: str | None, llm_enabled: bool, llm_base_url: str | None,
-    llm_api_key: str | None, llm_model: str | None, progress: gr.Progress = gr.Progress(),
+    llm_api_key: str | None, llm_model: str | None,
 ) -> Iterator[tuple[str, str, str | None, str | None]]:
     """Stream live events from the blocking pipeline into Gradio outputs."""
     try:
@@ -228,35 +235,36 @@ def run_ui(
     download_path: str | None = None
     status = "Đang chuẩn bị..."
     yield status, "\n".join(logs), image_path, download_path
+    last_yield = 0.0
     while True:
         kind, value = events.get()
         if kind == "end":
             break
+        frame_update = False
         if kind == "event":
             event = value
             assert isinstance(event, ProgressEvent)
             if event.phase == "roi":
                 status = f"Đang tìm ROI: {event.video.name}"
                 logs.append(status)
-                progress(0, desc=status)
             elif event.phase == "ocr":
                 if event.preview_path and event.preview_path.is_file() and event.preview_path != source_preview:
                     source_preview = event.preview_path
                     image_path = _public_copy(event.preview_path)
                 if event.processed_frames:
+                    frame_update = True
                     fraction = min(1.0, event.processed_frames / max(1, event.duration_seconds * config.fps))
-                    status = (f"Đang OCR: {event.video.name} — {event.processed_frames} khung hình, "
+                    detail = (f"Đang OCR: {event.video.name} — {event.processed_frames} khung hình, "
                               f"{event.processing_fps:.1f} FPS")
-                    progress(fraction, desc=status)
+                    status = f"{_progress_bar(fraction)} {detail}"
                     if event.processed_frames % 30 == 0:
-                        logs.append(status)
+                        logs.append(detail)
                 else:
                     status = f"Đã chọn ROI: {event.roi}"
                     logs.append(f"{event.video.name}: {event.message} {event.roi}")
             elif event.phase == "done":
                 status = f"Hoàn thành {event.video.name}: {event.message}"
                 logs.append(status)
-                progress(1, desc=status)
             elif event.phase == "failed":
                 status = f"Lỗi {event.video.name}: {event.message}"
                 logs.append(status)
@@ -272,6 +280,12 @@ def run_ui(
         else:
             status = f"Lỗi xử lý: {value}"
             logs.append(status)
+        # Frame-by-frame OCR events arrive many times per second; refreshing the
+        # page that often makes the output area flicker, so throttle those.
+        now = time.monotonic()
+        if frame_update and now - last_yield < UI_REFRESH_SECONDS:
+            continue
+        last_yield = now
         yield status, "\n".join(logs[-60:]), image_path, download_path
 
 
@@ -344,6 +358,7 @@ def build_app() -> gr.Blocks:
                     overwrite, auto_roi, x_min, y_min, x_max, y_max, watermark_terms,
                     llm_enabled, llm_base_url, llm_api_key, llm_model],
             outputs=[status, logs, preview_image, download],
+            show_progress="hidden",
         )
     return demo
 
