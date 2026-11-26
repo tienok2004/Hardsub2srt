@@ -21,6 +21,7 @@ ocr:
   language: auto  # auto, ch, vi, ja, en
   prefer_gpu: true
   model_size: small  # PP-OCRv6 multilingual model
+  skip_unchanged_frames: true  # reuse OCR text while the subtitle area is unchanged
 srt:
   similarity_threshold: 85
   watermark_seconds: 15.0

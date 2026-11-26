@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from .frame_change import FrameChangeDetector
 from .llm_refiner import LLMConfig, refine_subtitles
 from .ocr_engine import OCREngine, RecognizedText
 from .roi_detector import FULL_FRAME, ROI, ROIResult, detect_roi
@@ -36,6 +37,7 @@ class PipelineConfig:
     roi_padding_ratio: float = 0.03
     prefer_gpu: bool = True
     ocr_model_size: str = "small"
+    skip_unchanged_frames: bool = True
     builder: BuilderConfig = field(default_factory=BuilderConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     ffmpeg: str = "ffmpeg"
@@ -155,12 +157,18 @@ def _process_one(
     crop = None if roi == FULL_FRAME else roi.pixels(info.width, info.height)
     observations = []
     count = 0
+    reused = 0
+    change_detector = FrameChangeDetector() if config.skip_unchanged_frames else None
+    recognized: list[RecognizedText] = []
     ocr_started = time.perf_counter()
     for frame in sample_frames(video, fps=config.fps, ffmpeg=config.ffmpeg,
                                metadata=info, crop=crop):
-        recognized = engine.recognize(frame)
-        if detected.mode == "auto" and crop is not None:
-            recognized = _near_roi_anchor(recognized, roi, frame.width)
+        if change_detector is None or change_detector.changed(frame):
+            recognized = engine.recognize(frame)
+            if detected.mode == "auto" and crop is not None:
+                recognized = _near_roi_anchor(recognized, roi, frame.width)
+        else:
+            reused += 1  # Subtitle area unchanged: same text, new timestamp.
         observations.append(frame_from_ocr(frame.timestamp_seconds, frame.width, frame.height, recognized))
         count += 1
         if callback and (count == 1 or count % 10 == 0):
@@ -174,7 +182,8 @@ def _process_one(
     if callback:
         callback(ProgressEvent(video, "done", count, info.duration_seconds,
                                count / max(time.perf_counter() - ocr_started, 1e-9), roi,
-                               f"{len(entries)} phụ đề", detected.preview_path))
+                               f"{len(entries)} phụ đề; OCR {count - reused}/{count} khung hình",
+                               detected.preview_path))
     return FileResult(video, output, "completed", len(entries), count, elapsed, roi,
                       f"{len(entries)} phụ đề; {detected.message}")
 

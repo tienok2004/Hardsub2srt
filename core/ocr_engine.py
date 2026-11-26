@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import argparse
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,71 @@ class RecognizedText:
     text: str
     score: float
     box: TextBox
+
+
+REC_WIDTH_BUCKET = 128
+MAX_REC_SESSIONS = 32
+
+
+class _ShapeKeyedSession:
+    """One ONNX Runtime session per recognizer input shape.
+
+    ORT's CUDA convolution keeps cuDNN state for the *last* input shape only, so
+    a session that alternates between two widths rebuilds every conv plan on each
+    call (measured on a GTX 1650 Ti: 7 ms for a repeated shape, 99 ms when
+    alternating). Giving every shape its own session keeps each plan warm.
+    """
+
+    def __init__(self, base, cfg) -> None:  # type: ignore[no-untyped-def]
+        self._base = base
+        self._cfg = cfg
+        self._sessions: dict[tuple[int, ...], object] = {}
+
+    def __call__(self, batch):  # type: ignore[no-untyped-def]
+        key = tuple(batch.shape)
+        session = self._sessions.get(key)
+        if session is None:
+            if not self._sessions:
+                session = self._base
+            elif len(self._sessions) < MAX_REC_SESSIONS:
+                session = type(self._base)(self._cfg)
+            else:
+                session = self._base
+            self._sessions[key] = session
+        return session(batch)
+
+    def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+        return getattr(self._base, name)
+
+
+def _stabilize_recognizer_shapes(bucket: int = REC_WIDTH_BUCKET) -> None:
+    """Keep recognizer input shapes few and fixed so CUDA plans are reused.
+
+    * one text line per call, so the batch dimension is always 1;
+    * widths rounded up to ``bucket`` px. RapidOCR already pads lines with zeros
+      to the batch width, so the extra padding leaves the text unchanged;
+    * one ORT session per resulting shape (see ``_ShapeKeyedSession``).
+    """
+    from rapidocr.ch_ppocr_rec.main import TextRecognizer
+
+    if getattr(TextRecognizer, "_hardsub_stable_shapes", False):
+        return
+    original_resize = TextRecognizer.resize_norm_img
+    original_init = TextRecognizer.__init__
+
+    def resize_norm_img(self, img, max_wh_ratio):  # type: ignore[no-untyped-def]
+        height = self.rec_image_shape[1]
+        width = math.ceil(height * max_wh_ratio / bucket) * bucket
+        return original_resize(self, img, width / height)
+
+    def __init__(self, cfg):  # type: ignore[no-untyped-def]
+        original_init(self, cfg)
+        self.rec_batch_num = 1
+        self.session = _ShapeKeyedSession(self.session, cfg)
+
+    TextRecognizer.resize_norm_img = resize_norm_img
+    TextRecognizer.__init__ = __init__
+    TextRecognizer._hardsub_stable_shapes = True
 
 
 def _image(frame: SampledFrame | Image.Image) -> Image.Image:
@@ -82,6 +148,8 @@ class OCREngine:
             "EngineConfig.onnxruntime.use_cuda": self.using_gpu,
             "Global.log_level": "error",
         }
+        if self.using_gpu:
+            _stabilize_recognizer_shapes()
         self._engine: RapidOCR = RapidOCR(params=params)
         self.language = language
 

@@ -108,6 +108,7 @@ def _config(
         roi_padding_ratio=roi_cfg.get("padding_ratio", 0.03),
         prefer_gpu=DEFAULTS.get("ocr", {}).get("prefer_gpu", True),
         ocr_model_size=DEFAULTS.get("ocr", {}).get("model_size", "small"),
+        skip_unchanged_frames=DEFAULTS.get("ocr", {}).get("skip_unchanged_frames", True),
         builder=BuilderConfig(
             similarity_threshold=srt_cfg.get("similarity_threshold", 85),
             watermark_seconds=srt_cfg.get("watermark_seconds", 15),

@@ -120,6 +120,7 @@ def main() -> int:
             roi_padding_ratio=roi_settings.get("padding_ratio", 0.03),
             prefer_gpu=ocr_settings.get("prefer_gpu", True),
             ocr_model_size=ocr_settings.get("model_size", "small"),
+            skip_unchanged_frames=ocr_settings.get("skip_unchanged_frames", True),
             builder=builder,
             llm=llm,
             ffmpeg=_executable(args.ffmpeg or video_settings.get("ffmpeg", "ffmpeg"), "ffmpeg"),
