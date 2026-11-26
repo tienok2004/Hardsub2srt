@@ -4,6 +4,12 @@
 phát hiện ROI, OCR đa ngôn ngữ, ghép SRT, pipeline/CLI và **bước 5**:
 giao diện Gradio cùng Docker Compose cho NVIDIA GPU.
 
+Mã nguồn chính: [github.com/tienok2004/Hardsub2srt](https://github.com/tienok2004/Hardsub2srt).
+Khi tiếp tục trên máy khác, clone repository, đọc `AGENTS.md` và `WORKLOG.md`,
+rồi tạo lại `.venv` theo phần cài đặt bên dưới. Trước khi sửa ở một bản sao đã có,
+kiểm tra `git status -sb`, `git fetch origin main` và đồng bộ với `origin/main`;
+không ghi đè thay đổi chưa commit.
+
 ## Chạy thử bước 1
 
 Công cụ cài trên máy Windows hiện tại nằm trong `.tools/`. Chạy trực tiếp:
