@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -15,6 +16,18 @@ from typing import Iterator
 
 class VideoError(RuntimeError):
     """Raised when a video cannot be inspected or decoded."""
+
+
+def _own_process_group() -> dict:
+    """Keep FFmpeg/ffprobe out of the console's Ctrl+C.
+
+    Ctrl+C reaches every process attached to the console. The CLI turns Ctrl+C
+    into a graceful stop that still has to read frames, so the decoder must not
+    be killed by the same keypress; the pipeline closes it itself.
+    """
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
 
 
 @dataclass(frozen=True)
@@ -55,7 +68,8 @@ def probe_video(path: str | Path, *, ffprobe: str = "ffprobe") -> VideoMetadata:
         "-of", "json", str(video_path),
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=60)
+        result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=60,
+                                **_own_process_group())
         data = json.loads(result.stdout)
         stream = data["streams"][0]
         width, height = int(stream["width"]), int(stream["height"])
@@ -120,7 +134,8 @@ def sample_frames(
         "-vf", filter_graph, "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
     ]
     try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   **_own_process_group())
     except FileNotFoundError as exc:
         raise VideoError(f"Không tìm thấy ffmpeg: {ffmpeg}") from exc
     index = 0
@@ -182,7 +197,7 @@ def sample_frame_at(
         "-vf", f"scale={width}:{height}", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
     ]
     try:
-        result = subprocess.run(command, capture_output=True, timeout=40)
+        result = subprocess.run(command, capture_output=True, timeout=40, **_own_process_group())
     except FileNotFoundError as exc:
         raise VideoError(f"Không tìm thấy ffmpeg: {ffmpeg}") from exc
     except subprocess.TimeoutExpired as exc:

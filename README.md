@@ -96,6 +96,12 @@ ghi đè. Một video lỗi không dừng các video khác. Dùng `--roi x_min y
 Nếu logo ngắn vẫn lọt vào SRT, dùng `--watermark-term 'tên logo'` (lặp lại được)
 hoặc khai báo `srt.watermark_terms` trong `config.yaml`.
 
+**Dừng giữa chừng:** nhấn `Ctrl+C` một lần để dừng sau khung hình hiện tại. Phụ đề
+đã quét được lưu vào `<tên video>.partial.srt` trong thư mục đầu ra (bỏ qua bước
+sửa bằng LLM) và các video còn lại trong lô không được xử lý. Nhấn `Ctrl+C` lần nữa
+để thoát ngay mà không lưu. Tệp `.partial.srt` không chặn chế độ chạy tiếp: lần
+chạy sau vẫn xử lý lại video đó từ đầu.
+
 ## Web UI trên máy Windows này
 
 ```powershell
@@ -104,12 +110,19 @@ Set-Location 'D:\Tien data\Soft\Hardsub2srt'
 ```
 
 Trên Windows, trình duyệt sẽ tự mở `http://127.0.0.1:7860`. Nếu không tự mở,
-truy cập `http://localhost:7860` bằng tay. Dán đường dẫn video/thư mục trên máy đang chạy ứng
-dụng hoặc tải lên một video. Nút **Xem trước ROI** tạo ảnh khoanh vùng trước khi
+truy cập `http://localhost:7860` bằng tay. Khi chạy trên chính máy này (địa chỉ
+`127.0.0.1`), dùng nút **Chọn tệp video…** / **Chọn thư mục…** để mở hộp thoại chọn
+tệp của Windows: ứng dụng chỉ ghi nhận đường dẫn, không tải tệp lên. Trình duyệt
+không cho trang web biết đường dẫn thật của tệp kéo thả, nên chế độ này thay ô kéo
+thả bằng hộp thoại. Khi chạy trên máy chủ từ xa, ô **tải lên một video** hiện như cũ.
+Có thể dán đường dẫn có dấu ngoặc kép (ví dụ từ "Copy as path" của Explorer): khi
+rời ô nhập, ứng dụng tự bỏ ngoặc kép và các ký tự không hợp lệ như `?` `*` `<` `>` `|`. Nút **Xem trước ROI** tạo ảnh khoanh vùng trước khi
 chạy OCR. Trên ảnh, kéo bên trong khung xanh để di chuyển hoặc kéo góc/cạnh để
 đổi kích thước. Bốn ô tọa độ cập nhật theo khung; sửa các ô cũng làm khung đổi
 ngay mà không phải quét ROI lại. Mọi chỉnh sửa chuyển sang ROI thủ công cho lần
-xử lý tiếp theo. Nút **Bắt đầu xử lý** cập nhật tiến độ và nhật ký. Với một video, giao
+xử lý tiếp theo. Nút **Bắt đầu xử lý** cập nhật tiến độ và nhật ký. Nút **Dừng và
+lưu** dừng sau khung hình hiện tại và lưu phụ đề đã quét vào `<tên video>.partial.srt`
+trong thư mục đầu ra; đóng tab trình duyệt khi đang chạy cũng dừng và lưu như vậy. Với một video, giao
 diện hiển thị tệp SRT để tải. Nếu chọn thư mục đầu ra khác, tệp kết quả vẫn
 được lưu ở đó; bản phục vụ tải xuống được sao chép vào `web_cache/`.
 

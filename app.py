@@ -18,7 +18,8 @@ from PIL import Image
 
 from core.llm_refiner import LLMConfig
 from core.ocr_engine import OCREngine
-from core.pipeline import BatchSummary, PipelineConfig, ProgressEvent, run_batch
+from core.paths import clean_path_text, pick_local_path
+from core.pipeline import BatchSummary, PipelineConfig, ProgressEvent, format_clock, run_batch
 from core.roi_detector import ROI, detect_roi
 from core.roi_editor import HTML_TEMPLATE, CSS_TEMPLATE, JS_ON_LOAD
 from core.srt_builder import BuilderConfig
@@ -69,8 +70,8 @@ def _clean_text(value: str | None) -> str:
 def _source(path_text: str | None, uploaded: str | None) -> Path:
     if uploaded:
         path = Path(uploaded).resolve()
-    elif _clean_text(path_text):
-        path = _path(_clean_text(path_text))
+    elif clean_path_text(path_text):
+        path = _path(clean_path_text(path_text))
     else:
         raise ValueError("Hãy nhập đường dẫn video/thư mục hoặc tải lên một video.")
     if not path.exists():
@@ -89,7 +90,7 @@ def _config(
     watermark_text: str | None, llm_enabled: bool, llm_base_url: str | None,
     llm_api_key: str | None, llm_model: str | None,
 ) -> PipelineConfig:
-    output_value = _clean_text(output_text)
+    output_value = clean_path_text(output_text)
     if not output_value:
         raise ValueError("Hãy nhập thư mục đầu ra.")
     roi_cfg = DEFAULTS.get("roi", {})
@@ -135,7 +136,7 @@ def _detect_preview(
     source = _source(path_text, uploaded)
     if not source.is_file():
         raise ValueError("Ảnh xem trước cần một tệp video, không phải thư mục.")
-    output = _path(_clean_text(output_text) or "output")
+    output = _path(clean_path_text(output_text) or "output")
     manual = _roi(auto_roi, x_min, y_min, x_max, y_max)
     engine = OCREngine(
         prefer_gpu=DEFAULTS.get("ocr", {}).get("prefer_gpu", True),
@@ -202,6 +203,22 @@ def roi_from_sliders(value: dict, x_min: float, y_min: float, x_max: float, y_ma
     return {**value, "roi": [roi.x_min, roi.y_min, roi.x_max, roi.y_max]}, False, "Đã cập nhật khung ROI trên ảnh."
 
 
+# The web queue runs one job at a time (default_concurrency_limit=1), so a single
+# shared event is enough for the Stop button to reach the running job.
+_STOP_LOCK = threading.Lock()
+_ACTIVE_STOP: threading.Event | None = None
+
+
+def request_stop() -> str:
+    """Ask the running job to stop after the current frame and save its subtitles."""
+    with _STOP_LOCK:
+        event = _ACTIVE_STOP
+    if event is None:
+        return "Không có tác vụ nào đang chạy."
+    event.set()
+    return "Đang dừng... phụ đề đã quét sẽ được lưu vào thư mục đầu ra."
+
+
 def run_ui(
     path_text: str | None, uploaded: str | None, output_text: str | None, language: str, fps: int,
     recursive: bool, preserve: bool, overwrite: bool, auto_roi: bool,
@@ -218,11 +235,16 @@ def run_ui(
         yield f"Lỗi cấu hình: {exc}", str(exc), None, None
         return
 
+    global _ACTIVE_STOP
     events: queue.Queue[tuple[str, object]] = queue.Queue()
+    stop_event = threading.Event()
+    with _STOP_LOCK:
+        _ACTIVE_STOP = stop_event
 
     def worker() -> None:
         try:
-            result = run_batch(config, callback=lambda event: events.put(("event", event)))
+            result = run_batch(config, callback=lambda event: events.put(("event", event)),
+                               stop_event=stop_event)
             events.put(("summary", result))
         except Exception as exc:
             events.put(("error", exc))
@@ -231,11 +253,25 @@ def run_ui(
 
     threading.Thread(target=worker, daemon=True).start()
     logs = [f"Đầu vào: {config.input_path}", f"Đầu ra: {config.output_dir}"]
+    yield "Đang chuẩn bị...", "\n".join(logs), None, None
+    try:
+        yield from _stream_events(events, config, logs)
+    finally:
+        # Also reached when the browser tab is closed mid-run: stop the worker so
+        # it saves the partial subtitles instead of running on unseen.
+        stop_event.set()
+        with _STOP_LOCK:
+            if _ACTIVE_STOP is stop_event:
+                _ACTIVE_STOP = None
+
+
+def _stream_events(
+    events: "queue.Queue[tuple[str, object]]", config: PipelineConfig, logs: list[str],
+) -> Iterator[tuple[str, str, str | None, str | None]]:
     image_path: str | None = None
     source_preview: Path | None = None
     download_path: str | None = None
     status = "Đang chuẩn bị..."
-    yield status, "\n".join(logs), image_path, download_path
     last_yield = 0.0
     while True:
         kind, value = events.get()
@@ -257,7 +293,9 @@ def run_ui(
                     fraction = min(1.0, event.processed_frames / max(1, event.duration_seconds * config.fps))
                     detail = (f"Đang OCR: {event.video.name} — {event.processed_frames} khung hình, "
                               f"{event.processing_fps:.1f} FPS")
-                    status = f"{_progress_bar(fraction)} {detail}"
+                    eta = (f"còn ~{format_clock(event.eta_seconds)}" if event.eta_seconds is not None
+                           else "còn: đang tính...")
+                    status = f"{_progress_bar(fraction)} {detail} · {eta}"
                     if event.processed_frames % 30 == 0:
                         logs.append(detail)
                 else:
@@ -269,6 +307,9 @@ def run_ui(
             elif event.phase == "failed":
                 status = f"Lỗi {event.video.name}: {event.message}"
                 logs.append(status)
+            elif event.phase == "stopped":
+                status = f"Đã dừng {event.video.name}: {event.message}"
+                logs.append(status)
         elif kind == "summary":
             summary = value
             assert isinstance(summary, BatchSummary)
@@ -276,6 +317,9 @@ def run_ui(
                 logs.append(f"{item.status}: {item.video.name} → {item.output} ({item.message})")
             status = (f"Tổng kết: {summary.completed} hoàn thành, {summary.skipped} bỏ qua, "
                       f"{summary.failed} lỗi")
+            stopped = next((item for item in summary.files if item.status == "stopped"), None)
+            if stopped is not None:
+                status += f" — đã dừng: {stopped.message}"
             if len(summary.files) == 1 and summary.files[0].output.is_file():
                 download_path = _public_copy(summary.files[0].output)
         else:
@@ -290,16 +334,60 @@ def run_ui(
         yield status, "\n".join(logs[-60:]), image_path, download_path
 
 
-def build_app() -> gr.Blocks:
+def _initial_dir(current: str | None) -> str | None:
+    """Start the dialog next to the path already typed, when it exists."""
+    text = clean_path_text(current)
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    for candidate in (path, path.parent):
+        if candidate.is_dir():
+            return str(candidate)
+    return None
+
+
+def _picker(kind: str):  # type: ignore[no-untyped-def]
+    def pick(current: str | None) -> str:
+        try:
+            chosen = pick_local_path(kind, _initial_dir(current))
+        except Exception as exc:  # e.g. no desktop session available
+            raise gr.Error(str(exc)) from exc
+        return chosen if chosen else (current or "")  # Cancel keeps what was there
+    return pick
+
+
+def build_app(local_mode: bool = False) -> gr.Blocks:
+    """``local_mode``: browser and server are the same computer, so files are
+    chosen with the native dialog (path only, nothing uploaded). On a remote
+    server the dialog would open on the server, so the upload box is used."""
     WEB_CACHE.mkdir(parents=True, exist_ok=True)
     default_output = os.getenv("HARDSUB_OUTPUT_DIR", str(ROOT / "output"))
     default_input = os.getenv("HARDSUB_INPUT_DIR", "")
     with gr.Blocks(title="Hardsub2srt") as demo:
         gr.Markdown("# Hardsub2srt\nTrích phụ đề cứng từ video thành tệp SRT.")
-        with gr.Row():
-            input_path = gr.Textbox(value=default_input, label="Đường dẫn video hoặc thư mục trên máy chủ")
-            upload = gr.File(label="Hoặc tải lên một video", file_types=VIDEO_TYPES, type="filepath")
-        output_dir = gr.Textbox(value=default_output, label="Thư mục đầu ra")
+        with gr.Row(equal_height=True):
+            input_path = gr.Textbox(
+                value=default_input, scale=4,
+                label="Đường dẫn video hoặc thư mục" + ("" if local_mode else " trên máy chủ"),
+                placeholder=r"Ví dụ: C:\Videos\phim.mp4 — dán cả đường dẫn có dấu ngoặc kép cũng được",
+            )
+            with gr.Column(scale=1, min_width=160, visible=local_mode):
+                pick_file = gr.Button("Chọn tệp video…", size="sm")
+                pick_folder = gr.Button("Chọn thư mục…", size="sm")
+            upload = gr.File(label="Hoặc tải lên một video", file_types=VIDEO_TYPES, type="filepath",
+                             visible=not local_mode, scale=3)
+        with gr.Row(equal_height=False):
+            output_dir = gr.Textbox(value=default_output, label="Thư mục đầu ra", scale=4)
+            pick_output = gr.Button("Chọn thư mục…", size="sm", scale=1, min_width=160, visible=local_mode)
+        # Clean pasted paths when leaving the box or pressing Enter (not on every
+        # keystroke, so a space typed at the end of "My Videos" is not removed).
+        for box in (input_path, output_dir):
+            box.blur(clean_path_text, inputs=[box], outputs=[box], queue=False, show_progress="hidden")
+            box.submit(clean_path_text, inputs=[box], outputs=[box], queue=False, show_progress="hidden")
+        # queue=False: the dialog must open even while an OCR job holds the queue.
+        pick_file.click(_picker("file"), inputs=[input_path], outputs=[input_path], queue=False)
+        pick_folder.click(_picker("folder"), inputs=[input_path], outputs=[input_path], queue=False)
+        pick_output.click(_picker("folder"), inputs=[output_dir], outputs=[output_dir], queue=False)
         with gr.Row():
             language = gr.Dropdown(choices=[("Tự động / đa ngôn ngữ", "auto"), ("Tiếng Trung", "ch"),
                                             ("Tiếng Việt", "vi"), ("Tiếng Nhật", "ja"),
@@ -333,7 +421,9 @@ def build_app() -> gr.Blocks:
             llm_base_url = gr.Textbox(label="Base URL", placeholder="http://localhost:11434/v1")
             llm_api_key = gr.Textbox(label="API Key", type="password")
             llm_model = gr.Textbox(label="Tên mô hình")
-        run_button = gr.Button("Bắt đầu xử lý", variant="primary")
+        with gr.Row():
+            run_button = gr.Button("Bắt đầu xử lý", variant="primary", scale=4)
+            stop_button = gr.Button("Dừng và lưu", variant="stop", scale=1)
         status = gr.Textbox(label="Trạng thái", interactive=False)
         logs = gr.Textbox(label="Nhật ký trực tiếp", lines=12, interactive=False)
         download = gr.File(label="Tải tệp SRT (chạy một video)", interactive=False)
@@ -361,6 +451,9 @@ def build_app() -> gr.Blocks:
             outputs=[status, logs, preview_image, download],
             show_progress="hidden",
         )
+        # queue=False: the job queue is busy with the running job, so the Stop
+        # click must bypass it to reach that job.
+        stop_button.click(request_stop, outputs=[status], queue=False, show_progress="hidden")
     return demo
 
 
@@ -372,7 +465,8 @@ if __name__ == "__main__":
     local_windows = os.name == "nt"
     server_name = os.getenv("HARDSUB_WEB_HOST") or ("127.0.0.1" if local_windows else "0.0.0.0")
     server_port = int(os.getenv("HARDSUB_WEB_PORT", "7860"))
-    build_app().queue(default_concurrency_limit=1).launch(
+    local_mode = server_name in {"127.0.0.1", "localhost", "::1"}
+    build_app(local_mode=local_mode).queue(default_concurrency_limit=1).launch(
         server_name=server_name,
         server_port=server_port, inbrowser=local_windows, auth=auth,
         allowed_paths=[str(WEB_CACHE)], show_error=True,

@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import logging
+import math
+import threading
 import time
+from collections import deque
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -60,6 +64,7 @@ class ProgressEvent:
     roi: ROI | None = None
     message: str = ""
     preview_path: Path | None = None
+    eta_seconds: float | None = None  # time left for this video; None until measurable
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,10 @@ class BatchSummary:
     @property
     def failed(self) -> int:
         return sum(result.status == "failed" for result in self.files)
+
+    @property
+    def stopped(self) -> bool:
+        return any(result.status == "stopped" for result in self.files)
 
 
 ProgressCallback = Callable[[ProgressEvent], None]
@@ -131,11 +140,75 @@ def _preview_path(output: Path) -> Path:
     return output.with_name(output.stem + "_roi_preview.jpg")
 
 
+def partial_output_path(output: Path) -> Path:
+    """Where a stopped run saves what it read so far.
+
+    A separate name keeps resume working: the next run does not mistake a
+    half-finished file for a completed ``.srt`` and will process the video again.
+    """
+    return output.with_name(output.stem + ".partial.srt")
+
+
+def format_clock(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    return f"{seconds // 3600:d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+
+
+class EtaEstimator:
+    """Estimate time left from the recent processing rate.
+
+    Speed changes a lot within one video: frames that skip OCR are ~10x faster
+    than frames that need it, so a dialogue-heavy scene is much slower than a
+    quiet one. A sliding window follows those changes, while the whole-run
+    average is used until the window has enough data.
+    """
+
+    def __init__(self, total_frames: int, *, window_seconds: float = 30.0, min_seconds: float = 3.0,
+                 clock: Callable[[], float] = time.perf_counter) -> None:
+        self.total_frames = max(0, total_frames)
+        self.window_seconds = window_seconds
+        self.min_seconds = min_seconds
+        self._clock = clock
+        self._started = clock()
+        self._samples: deque[tuple[float, int]] = deque([(self._started, 0)])
+        self._baseline_set = False
+        self._base_frames = 0
+
+    def update(self, done_frames: int) -> float | None:
+        now = self._clock()
+        if not self._baseline_set and done_frames > 0:
+            # The first OCR call carries one-off GPU warm-up (~1 s); measuring
+            # from after it keeps the early estimate from being inflated.
+            self._baseline_set = True
+            self._started = now - 1e-9
+            self._samples = deque([(now, done_frames)])
+            self._base_frames = done_frames
+            return None
+        self._samples.append((now, done_frames))
+        while len(self._samples) > 2 and now - self._samples[1][0] >= self.window_seconds:
+            self._samples.popleft()
+        if now - self._started < self.min_seconds or done_frames <= 0:
+            return None
+        old_time, old_frames = self._samples[0]
+        if now - old_time >= self.min_seconds and done_frames > old_frames:
+            rate = (done_frames - old_frames) / (now - old_time)
+        else:
+            rate = (done_frames - self._base_frames) / (now - self._started)
+        if rate <= 0:
+            return None
+        return max(0, self.total_frames - done_frames) / rate
+
+
 def _process_one(
     video: Path, output: Path, config: PipelineConfig,
     engine: OCREngine, callback: ProgressCallback | None,
+    stop_event: threading.Event | None = None,
 ) -> FileResult:
     started = time.perf_counter()
+
+    def stop_requested() -> bool:
+        return stop_event is not None and stop_event.is_set()
+
     info = probe_video(video, ffprobe=config.ffprobe)
     if callback:
         callback(ProgressEvent(video, "roi", duration_seconds=info.duration_seconds))
@@ -150,6 +223,12 @@ def _process_one(
         ffmpeg=config.ffmpeg, ffprobe=config.ffprobe,
     )
     roi = detected.roi
+    if stop_requested():
+        if callback:
+            callback(ProgressEvent(video, "stopped", duration_seconds=info.duration_seconds,
+                                   roi=roi, message="Đã dừng trước khi OCR; chưa có phụ đề để lưu"))
+        return FileResult(video, output, "stopped", 0, 0, time.perf_counter() - started, roi,
+                          "Đã dừng trước khi OCR; không ghi tệp")
     if callback:
         callback(ProgressEvent(video, "ocr", duration_seconds=info.duration_seconds,
                                roi=roi, message=detected.message,
@@ -161,21 +240,40 @@ def _process_one(
     change_detector = FrameChangeDetector() if config.skip_unchanged_frames else None
     recognized: list[RecognizedText] = []
     ocr_started = time.perf_counter()
-    for frame in sample_frames(video, fps=config.fps, ffmpeg=config.ffmpeg,
-                               metadata=info, crop=crop):
-        if change_detector is None or change_detector.changed(frame):
-            recognized = engine.recognize(frame)
-            if detected.mode == "auto" and crop is not None:
-                recognized = _near_roi_anchor(recognized, roi, frame.width)
-        else:
-            reused += 1  # Subtitle area unchanged: same text, new timestamp.
-        observations.append(frame_from_ocr(frame.timestamp_seconds, frame.width, frame.height, recognized))
-        count += 1
-        if callback and (count == 1 or count % 10 == 0):
-            elapsed = max(1e-9, time.perf_counter() - ocr_started)
-            callback(ProgressEvent(video, "ocr", count, info.duration_seconds,
-                                   count / elapsed, roi))
+    eta = EtaEstimator(math.ceil(info.duration_seconds * config.fps))
+    stopped = False
+    frames = sample_frames(video, fps=config.fps, ffmpeg=config.ffmpeg, metadata=info, crop=crop)
+    with closing(frames):  # Closing the generator stops FFmpeg right away.
+        for frame in frames:
+            if stop_requested():
+                stopped = True
+                break
+            if change_detector is None or change_detector.changed(frame):
+                recognized = engine.recognize(frame)
+                if detected.mode == "auto" and crop is not None:
+                    recognized = _near_roi_anchor(recognized, roi, frame.width)
+            else:
+                reused += 1  # Subtitle area unchanged: same text, new timestamp.
+            observations.append(frame_from_ocr(frame.timestamp_seconds, frame.width, frame.height, recognized))
+            count += 1
+            if callback and (count == 1 or count % 10 == 0):
+                elapsed = max(1e-9, time.perf_counter() - ocr_started)
+                callback(ProgressEvent(video, "ocr", count, info.duration_seconds,
+                                       count / elapsed, roi, eta_seconds=eta.update(count)))
     entries = build_subtitles(observations, config=config.builder, sample_fps=config.fps)
+    if stopped:
+        # Save what was read so far; skip the optional LLM pass so stopping stays fast.
+        partial = partial_output_path(output)
+        write_srt(entries, partial)
+        scanned = count / config.fps
+        message = (f"Đã dừng ở {format_clock(scanned)}/{format_clock(info.duration_seconds)}; "
+                   f"lưu {len(entries)} phụ đề vào {partial.name}")
+        if callback:
+            callback(ProgressEvent(video, "stopped", count, info.duration_seconds,
+                                   count / max(time.perf_counter() - ocr_started, 1e-9), roi,
+                                   message, detected.preview_path))
+        return FileResult(video, partial, "stopped", len(entries), count,
+                          time.perf_counter() - started, roi, message)
     entries = refine_subtitles(entries, config.llm)
     write_srt(entries, output)
     elapsed = time.perf_counter() - started
@@ -190,9 +288,13 @@ def _process_one(
 
 def run_batch(
     config: PipelineConfig, *, callback: ProgressCallback | None = None,
-    engine: OCREngine | None = None,
+    engine: OCREngine | None = None, stop_event: threading.Event | None = None,
 ) -> BatchSummary:
-    """Process videos sequentially, with deterministic collision and resume rules."""
+    """Process videos sequentially, with deterministic collision and resume rules.
+
+    Setting ``stop_event`` stops at the next frame: the current video's subtitles
+    so far are saved with ``partial_output_path`` and remaining videos are left.
+    """
     root = config.input_path.expanduser().resolve()
     videos = _videos(root, config.recursive)
     output_dir = config.output_dir.expanduser().resolve()
@@ -201,6 +303,8 @@ def run_batch(
     results: list[FileResult] = []
     destinations: set[str] = set()
     for video in videos:
+        if stop_event is not None and stop_event.is_set():
+            break
         output = _output_path(video, root, effective)
         key = str(output).casefold()
         if key in destinations:
@@ -216,7 +320,7 @@ def run_batch(
             active_engine = engine or OCREngine(effective.language, prefer_gpu=effective.prefer_gpu,
                                                model_size=effective.ocr_model_size)
             engine = active_engine
-            results.append(_process_one(video, output, effective, active_engine, callback))
+            results.append(_process_one(video, output, effective, active_engine, callback, stop_event))
         except Exception as exc:
             LOGGER.error("Không xử lý được %s: %s", video, exc)
             if callback:

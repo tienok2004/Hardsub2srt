@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import signal
+import threading
 import logging
 import os
 import shutil
@@ -14,13 +16,19 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeElapsedColumn
 
 from core.llm_refiner import LLMConfig
-from core.pipeline import PipelineConfig, ProgressEvent, run_batch
+from core.paths import clean_path_text
+from core.pipeline import PipelineConfig, ProgressEvent, format_clock, run_batch
 from core.roi_detector import ROI
 from core.srt_builder import BuilderConfig
 
 
 def _setting(cli_value, config_value):
     return config_value if cli_value is None else cli_value
+
+
+def _clean_path(value: str) -> Path:
+    """Accept pasted paths such as "C:\Videos\a.mp4" with stray quotes."""
+    return Path(clean_path_text(value))
 
 
 def _executable(value: str, name: str) -> str:
@@ -45,8 +53,8 @@ def _load_settings(path: Path) -> dict:
 
 def _options() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Trích phụ đề cứng từ video thành SRT")
-    parser.add_argument("--input", required=True, type=Path, help="Tệp video hoặc thư mục đầu vào")
-    parser.add_argument("--output", type=Path, help="Thư mục lưu SRT")
+    parser.add_argument("--input", required=True, type=_clean_path, help="Tệp video hoặc thư mục đầu vào")
+    parser.add_argument("--output", type=_clean_path, help="Thư mục lưu SRT")
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config.yaml"))
     parser.add_argument("--lang", choices=("auto", "ch", "vi", "ja", "en"))
     parser.add_argument("--fps", type=float)
@@ -133,38 +141,68 @@ def main() -> int:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
     tasks: dict[Path, int] = {}
     progress = Progress(TextColumn("{task.description}"), BarColumn(), TaskProgressColumn(),
-                        TextColumn("{task.fields[rate]}"), TimeElapsedColumn(), console=console)
+                        TextColumn("{task.fields[rate]}"), TimeElapsedColumn(),
+                        TextColumn("{task.fields[eta]}"), console=console)
 
     def update(event: ProgressEvent) -> None:
         if event.phase == "roi":
             tasks[event.video] = progress.add_task(event.video.name, total=max(event.duration_seconds, 1e-6),
-                                                   rate="đang tìm ROI")
+                                                   rate="đang tìm ROI", eta="")
         elif event.phase == "ocr":
             if event.roi is not None and event.processed_frames == 0:
                 console.print(f"ROI {event.video.name}: {event.roi}")
             task = tasks.get(event.video)
             if task is not None:
+                if event.eta_seconds is not None:
+                    eta = f"còn ~{format_clock(event.eta_seconds)}"
+                else:
+                    eta = "còn: đang tính..." if event.processed_frames else ""
                 progress.update(task, completed=min(event.duration_seconds, event.processed_frames / config.fps),
-                                rate=f"{event.processing_fps:.1f} FPS" if event.processed_frames else "đang OCR")
+                                rate=f"{event.processing_fps:.1f} FPS" if event.processed_frames else "đang OCR",
+                                eta=eta)
         elif event.phase == "done":
             task = tasks.get(event.video)
             if task is not None:
                 progress.update(task, completed=event.duration_seconds,
-                                rate=f"{event.processing_fps:.1f} FPS")
+                                rate=f"{event.processing_fps:.1f} FPS", eta="xong")
         elif event.phase == "failed":
             console.print(f"[red]Lỗi {event.video.name}:[/red] {event.message}")
+        elif event.phase == "stopped":
+            if (task := tasks.get(event.video)) is not None:
+                progress.update(task, eta="đã dừng")
+            console.print(f"[yellow]Đã dừng {event.video.name}:[/yellow] {event.message}")
 
+    # First Ctrl+C: stop after the current frame and save what was read.
+    # Second Ctrl+C: quit immediately without saving.
+    stop_event = threading.Event()
+
+    def request_stop(signum, frame) -> None:  # type: ignore[no-untyped-def]
+        if stop_event.is_set():
+            raise KeyboardInterrupt
+        stop_event.set()
+        console.print("[yellow]Đang dừng... phụ đề đã quét sẽ được lưu. "
+                      "Nhấn Ctrl+C lần nữa để thoát ngay (không lưu).[/yellow]")
+
+    previous_handler = signal.signal(signal.SIGINT, request_stop)
+    console.print("Nhấn Ctrl+C để dừng giữa chừng và lưu phụ đề đã quét.")
     try:
         with progress:
-            summary = run_batch(config, callback=update)
+            summary = run_batch(config, callback=update, stop_event=stop_event)
+    except KeyboardInterrupt:
+        console.print("[red]Đã thoát ngay; không lưu phụ đề.[/red]")
+        return 130
     except (OSError, ValueError) as exc:
         console.print(f"[red]Không chạy được:[/red] {exc}")
         return 2
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
     for result in summary.files:
         console.print(f"{result.status}: {result.video.name} → {result.output} "
                       f"({result.subtitle_count} phụ đề) {result.message}")
     console.print(f"Tổng kết: {summary.completed} hoàn thành, {summary.skipped} bỏ qua, "
-                  f"{summary.failed} lỗi")
+                  f"{summary.failed} lỗi" + (" — đã dừng giữa chừng" if summary.stopped else ""))
+    if summary.stopped:
+        return 130
     if not summary.files:
         console.print("Không tìm thấy video phù hợp.")
         return 1
