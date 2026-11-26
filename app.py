@@ -18,7 +18,7 @@ from PIL import Image
 
 from core.llm_refiner import LLMConfig
 from core.ocr_engine import OCREngine
-from core.captions import caption_config_from
+from core.captions import caption_config_from, screen_text_config_from
 from core.paths import clean_path_text, pick_local_path
 from core.pipeline import BatchSummary, PipelineConfig, ProgressEvent, format_clock, run_batch
 from core.roi_detector import ROI, detect_roi
@@ -41,7 +41,8 @@ def _public_copy(path: Path) -> str:
     """Expose generated files through a narrow Gradio allowlist."""
     WEB_CACHE.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
-    target = WEB_CACHE / f"{digest}_{path.name}"
+    target = WEB_CACHE / digest / path.name
+    target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, target)
     return str(target)
 
@@ -113,6 +114,7 @@ def _config(
         skip_unchanged_frames=DEFAULTS.get("ocr", {}).get("skip_unchanged_frames", True),
         captions_output=captions_output,
         captions=caption_config_from(DEFAULTS.get("captions"), srt_cfg.get("watermark_seconds", 15)),
+        screen_text=screen_text_config_from(DEFAULTS.get("captions", {}).get("screen_text")),
         builder=BuilderConfig(
             similarity_threshold=srt_cfg.get("similarity_threshold", 85),
             watermark_seconds=srt_cfg.get("watermark_seconds", 15),
@@ -228,7 +230,7 @@ def run_ui(
     x_min: float, y_min: float, x_max: float, y_max: float,
     watermark_text: str | None, llm_enabled: bool, llm_base_url: str | None,
     llm_api_key: str | None, llm_model: str | None, captions_output: str = "merged",
-) -> Iterator[tuple[str, str, str | None, str | None]]:
+) -> Iterator[tuple[str, str, str | None, list[str] | None]]:
     """Stream live events from the blocking pipeline into Gradio outputs."""
     try:
         config = _config(path_text, uploaded, output_text, language, fps, recursive,
@@ -271,10 +273,10 @@ def run_ui(
 
 def _stream_events(
     events: "queue.Queue[tuple[str, object]]", config: PipelineConfig, logs: list[str],
-) -> Iterator[tuple[str, str, str | None, str | None]]:
+) -> Iterator[tuple[str, str, str | None, list[str] | None]]:
     image_path: str | None = None
     source_preview: Path | None = None
-    download_path: str | None = None
+    download_paths: list[str] | None = None
     status = "Đang chuẩn bị..."
     last_yield = 0.0
     while True:
@@ -318,14 +320,18 @@ def _stream_events(
             summary = value
             assert isinstance(summary, BatchSummary)
             for item in summary.files:
-                logs.append(f"{item.status}: {item.video.name} → {item.output} ({item.message})")
+                paths = item.outputs or (item.output,)
+                logs.append(f"{item.status}: {item.video.name} → "
+                            f"{', '.join(str(path) for path in paths)} ({item.message})")
             status = (f"Tổng kết: {summary.completed} hoàn thành, {summary.skipped} bỏ qua, "
                       f"{summary.failed} lỗi")
             stopped = next((item for item in summary.files if item.status == "stopped"), None)
             if stopped is not None:
                 status += f" — đã dừng: {stopped.message}"
-            if len(summary.files) == 1 and summary.files[0].output.is_file():
-                download_path = _public_copy(summary.files[0].output)
+            if len(summary.files) == 1:
+                paths = summary.files[0].outputs or (summary.files[0].output,)
+                available = [path for path in paths if path.is_file()]
+                download_paths = [_public_copy(path) for path in available] or None
         else:
             status = f"Lỗi xử lý: {value}"
             logs.append(status)
@@ -335,7 +341,7 @@ def _stream_events(
         if frame_update and now - last_yield < UI_REFRESH_SECONDS:
             continue
         last_yield = now
-        yield status, "\n".join(logs[-60:]), image_path, download_path
+        yield status, "\n".join(logs[-60:]), image_path, download_paths
 
 
 def _initial_dir(current: str | None) -> str | None:
@@ -421,10 +427,10 @@ def build_app(local_mode: bool = False) -> gr.Blocks:
                                     label="Từ khóa watermark cần bỏ qua (ngăn cách bằng dấu phẩy)",
                                     placeholder="Ví dụ: tên logo")
         captions_output = gr.Dropdown(
-            choices=[("Gộp vào tệp SRT (hiện ở đầu màn hình)", "merged"),
+            choices=[("Gộp vào tệp SRT", "merged"),
                      ("Lưu tệp riêng <tên>.captions.srt", "separate"), ("Bỏ qua", "off")],
             value=DEFAULTS.get("captions", {}).get("output", "merged"),
-            label="Câu chú thích/biên tập ngoài vùng hội thoại (tự loại logo, quảng cáo, biển hiệu)",
+            label="Chú thích và tin nhắn trên màn hình (tự lọc logo, quảng cáo)",
         )
         with gr.Accordion("Sửa lỗi OCR bằng LLM (tùy chọn)", open=False):
             llm_enabled = gr.Checkbox(value=False, label="Bật sửa OCR bằng LLM")
@@ -436,7 +442,8 @@ def build_app(local_mode: bool = False) -> gr.Blocks:
             stop_button = gr.Button("Dừng và lưu", variant="stop", scale=1)
         status = gr.Textbox(label="Trạng thái", interactive=False)
         logs = gr.Textbox(label="Nhật ký trực tiếp", lines=12, interactive=False)
-        download = gr.File(label="Tải tệp SRT (chạy một video)", interactive=False)
+        download = gr.File(label="Tải các tệp SRT (chạy một video)",
+                           file_count="multiple", interactive=False)
 
         preview_button.click(
             preview_roi_editor,

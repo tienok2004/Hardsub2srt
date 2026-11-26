@@ -4,12 +4,32 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import queue
 from pathlib import Path
 
-from app import WEB_CACHE, preview_roi, preview_roi_editor, roi_from_image, roi_from_sliders, run_ui
+from app import (WEB_CACHE, _stream_events, preview_roi, preview_roi_editor,
+                 roi_from_image, roi_from_sliders, run_ui)
+from core.pipeline import BatchSummary, FileResult, PipelineConfig
 
 
 class WebFlowTests(unittest.TestCase):
+    def test_web_download_includes_both_languages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            zh = root / "movie.zh.srt"
+            en = root / "movie.en.srt"
+            zh.write_text("中文", encoding="utf-8")
+            en.write_text("English", encoding="utf-8")
+            video = root / "movie.mp4"
+            events = queue.Queue()
+            events.put(("summary", BatchSummary((FileResult(
+                video, zh, "completed", outputs=(zh, en)),))))
+            events.put(("end", None))
+            updates = list(_stream_events(events, PipelineConfig(video, root), []))
+            downloads = updates[-1][3]
+            self.assertEqual(len(downloads), 2)
+            self.assertEqual({Path(path).name for path in downloads}, {zh.name, en.name})
+
     @classmethod
     def setUpClass(cls) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -36,7 +56,7 @@ class WebFlowTests(unittest.TestCase):
         self.assertIn("ROI thủ công", status)
         self.assertIsNotNone(image)
         self.assertTrue(Path(image).is_file())
-        self.assertEqual(Path(image).parent, WEB_CACHE)
+        self.assertEqual(Path(image).parent.parent, WEB_CACHE)
 
     def test_editor_preview_and_coordinate_sync(self) -> None:
         editor, status, x1, y1, x2, y2 = preview_roi_editor(
@@ -63,8 +83,9 @@ class WebFlowTests(unittest.TestCase):
         self.assertIn("1 hoàn thành", status)
         self.assertIn("web_sample.mp4", logs)
         self.assertTrue(Path(preview).is_file())
-        self.assertTrue(Path(download).is_file())
-        self.assertEqual(Path(download).parent, WEB_CACHE)
+        self.assertTrue(download)
+        self.assertTrue(all(Path(path).is_file() for path in download))
+        self.assertTrue(all(Path(path).parent.parent == WEB_CACHE for path in download))
 
     def test_empty_optional_textboxes_do_not_block_processing(self) -> None:
         updates = list(run_ui(
@@ -75,7 +96,8 @@ class WebFlowTests(unittest.TestCase):
         status, logs, _, download = updates[-1]
         self.assertIn("1 hoàn thành", status)
         self.assertNotIn("Lỗi cấu hình", logs)
-        self.assertTrue(Path(download).is_file())
+        self.assertTrue(download)
+        self.assertTrue(all(Path(path).is_file() for path in download))
 
 
 if __name__ == "__main__":

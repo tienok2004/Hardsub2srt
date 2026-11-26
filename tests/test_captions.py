@@ -1,19 +1,21 @@
 import unittest
 
 from core.captions import (
-    TOP_TAG, CaptionConfig, CaptionFrame, CaptionText, angle_of, build_captions,
-    caption_config_from, merge_entries,
+    TOP_TAG, CaptionConfig, CaptionFrame, CaptionText, ScreenTextConfig, angle_of,
+    build_captions, build_screen_text, caption_config_from, merge_entries,
+    screen_text_config_from,
 )
-from core.pipeline import _caption_zones
+from core.pipeline import _caption_zones, _without_screen_region
 from core.roi_detector import ROI
-from core.srt_builder import SubtitleEntry
+from core.srt_builder import FrameObservation, SubtitleEntry, TextObservation
 
 INTERVAL = 1 / 3
 DIALOGUE_HEIGHT = 0.06
 
 
-def _text(text, x=0.40, y=0.08, *, width=0.20, height=0.05, confidence=0.95, angle=0.0):
-    return CaptionText(text, confidence, (x, y, x + width, y + height), angle)
+def _text(text, x=0.40, y=0.08, *, width=0.20, height=0.05, confidence=0.95,
+          angle=0.0, vertical=False):
+    return CaptionText(text, confidence, (x, y, x + width, y + height), angle, vertical)
 
 
 def _frames(duration, texts_at, total=None):
@@ -27,11 +29,41 @@ def _build(frames, **kwargs):
 
 
 class CaptionFilterTests(unittest.TestCase):
+    def test_groups_vertical_character_name_and_description(self):
+        frames = _frames(5, lambda t: [
+            _text("赵丽颖", x=0.06, y=0.04, width=0.12, height=0.18,
+                  confidence=0.88, vertical=True),
+            _text("金鸡奖影后", x=0.19, y=0.09, width=0.10, height=0.22,
+                  confidence=0.99, vertical=True),
+            _text("hddjai.cc", x=0.50, y=0.12, width=0.08, height=0.20,
+                  vertical=True),
+        ] if 1 <= t < 3.5 else [])
+        entries, rejected = _build(frames)
+        self.assertEqual([entry.text for entry in entries],
+                         [TOP_TAG + "(赵丽颖：金鸡奖影后)"])
+        self.assertIn("chữ dọc không phải chú thích", rejected)
+
+    def test_vertical_ocr_variants_at_same_position_do_not_repeat_name(self):
+        def texts(t):
+            if not 1 <= t < 4:
+                return []
+            correct = round(t / INTERVAL) % 2 == 0
+            return [
+                _text("赵丽颖" if correct else "赵丽颍", x=0.06, y=0.04,
+                      width=0.12, height=0.18, confidence=0.95 if correct else 0.85,
+                      vertical=True),
+                _text("金鸡奖影后", x=0.19, y=0.09, width=0.10, height=0.22,
+                      vertical=True),
+            ]
+        entries, _ = _build(_frames(5, texts))
+        self.assertEqual([entry.text for entry in entries],
+                         [TOP_TAG + "(赵丽颖：金鸡奖影后)"])
+
     def test_keeps_a_level_still_caption_and_tags_it_for_the_top(self):
         frames = _frames(8, lambda t: [_text("Hà Nội, mùa thu năm 1975")] if 1 <= t < 5 else [])
         entries, rejected = _build(frames)
         self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0].text, TOP_TAG + "Hà Nội, mùa thu năm 1975")
+        self.assertEqual(entries[0].text, TOP_TAG + "(Hà Nội, mùa thu năm 1975)")
         self.assertAlmostEqual(entries[0].start_ms, 1000, delta=40)
         self.assertAlmostEqual(entries[0].end_ms, 5000, delta=40)
         self.assertEqual(rejected, {})
@@ -54,6 +86,19 @@ class CaptionFilterTests(unittest.TestCase):
         entries, rejected = _build(frames, watermark_terms=["NhómABC"])
         self.assertEqual(entries, [])
         self.assertEqual(rejected.get("quảng cáo / watermark"), 2)
+
+    def test_drops_short_lived_corner_logo(self):
+        frames = _frames(8, lambda t: [_text("红豆短剧", x=0.16, y=0.05, width=0.22)]
+                         if 1 <= t < 5 else [])
+        entries, rejected = _build(frames)
+        self.assertEqual(entries, [])
+        self.assertIn("logo ở góc khung hình", rejected)
+
+    def test_keeps_long_editorial_caption_in_a_corner(self):
+        frames = _frames(8, lambda t: [_text("Hà Nội, 1975", x=0.05, y=0.05, width=0.30)]
+                         if 1 <= t < 5 else [])
+        entries, _ = _build(frames)
+        self.assertEqual([entry.text for entry in entries], [TOP_TAG + "(Hà Nội, 1975)"])
 
     def test_drops_tilted_scene_text(self):
         frames = _frames(8, lambda t: [_text("ADIDAS ORIGINALS", angle=-12)] if 1 <= t < 5 else [])
@@ -92,7 +137,7 @@ class CaptionFilterTests(unittest.TestCase):
     def test_no_top_tag_for_captions_in_the_lower_half(self):
         frames = _frames(6, lambda t: [_text("Ghi chú", y=0.60)] if 1 <= t < 4 else [])
         entries, _ = _build(frames)
-        self.assertEqual(entries[0].text, "Ghi chú")
+        self.assertEqual(entries[0].text, "(Ghi chú)")
 
 
 class CaptionHelpersTests(unittest.TestCase):
@@ -126,6 +171,53 @@ class CaptionHelpersTests(unittest.TestCase):
             CaptionConfig(zones=((0.5, 0.0, 0.2, 0.3),))
         with self.assertRaises(ValueError):
             CaptionConfig(max_repeats=1)
+
+
+class ScreenTextTests(unittest.TestCase):
+    def test_phone_message_is_parenthesized_while_logos_and_headers_are_ignored(self):
+        def texts(t):
+            result = [_text("xunse.org", x=0.02, y=0.01, height=0.035),
+                      _text("红豆短剧", x=0.14, y=0.05),
+                      _text("红豆短剧", x=0.73, y=0.93)]
+            if 1 <= t < 5:
+                result.extend([_text("消息", x=0.65, y=0.39, width=0.07),
+                               _text("21.38", x=0.57, y=0.36, width=0.05),
+                               _text("恭喜，终于等到这一天了。", x=0.52 + 0.004 * t,
+                                     y=0.43 + 0.003 * t, width=0.27,
+                                     height=0.06, angle=13)])
+            return result
+        entries, _ = build_screen_text(_frames(8, texts), interval=INTERVAL)
+        self.assertEqual([entry.text for entry in entries], ["(恭喜，终于等到这一天了。)"])
+        self.assertAlmostEqual(entries[0].start_ms, 1000, delta=40)
+        self.assertAlmostEqual(entries[0].end_ms, 5000, delta=40)
+
+    def test_rejects_repeated_ad_and_static_brand_inside_screen_area(self):
+        def texts(t):
+            result = [_text("xunse.org", x=0.4, y=0.4)] if t < 4 else []
+            if t < 20:
+                result.append(_text("红豆短剧官方出品", x=0.45, y=0.5))
+            return result
+        entries, reasons = build_screen_text(_frames(25, texts), interval=INTERVAL)
+        self.assertEqual(entries, [])
+        self.assertIn("quảng cáo / watermark", reasons)
+        self.assertIn("đứng yên quá lâu (logo)", reasons)
+
+    def test_full_frame_dialogue_does_not_repeat_accepted_phone_content(self):
+        zones = [ROI(0.12, 0.28, 0.88, 0.78)]
+        frame = FrameObservation(1.0, (
+            TextObservation("消息", 0.99, (0.65, 0.39, 0.72, 0.42)),
+            TextObservation("恭喜，终于等到这一天了。", 0.99, (0.52, 0.43, 0.79, 0.49)),
+            TextObservation("Lời thoại", 0.99, (0.3, 0.84, 0.7, 0.9)),
+        ))
+        result = _without_screen_region([frame], [SubtitleEntry(1, 1000, 2000, "(恭喜，终于等到这一天了。)")], zones)
+        self.assertEqual([text.text for text in result[0].texts], ["Lời thoại"])
+
+    def test_screen_configuration(self):
+        config = screen_text_config_from({"enabled": False, "zones": [[0.2, 0.3, 0.8, 0.7]]})
+        self.assertFalse(config.enabled)
+        self.assertEqual(config.zones, ((0.2, 0.3, 0.8, 0.7),))
+        with self.assertRaises(ValueError):
+            ScreenTextConfig(zones=((0.9, 0.2, 0.1, 0.8),))
 
 
 if __name__ == "__main__":

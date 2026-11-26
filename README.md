@@ -96,19 +96,41 @@ ghi đè. Một video lỗi không dừng các video khác. Dùng `--roi x_min y
 Nếu logo ngắn vẫn lọt vào SRT, dùng `--watermark-term 'tên logo'` (lặp lại được)
 hoặc khai báo `srt.watermark_terms` trong `config.yaml`.
 
+**Tách theo ngôn ngữ:** mỗi dòng OCR trong vùng hội thoại được đưa vào luồng ngôn
+ngữ tương ứng trước khi ghép thời gian. Video song ngữ Trung–Anh như `1.mp4` tạo
+`1.zh.srt` và `1.en.srt`; video một ngôn ngữ cũng dùng hậu tố ngôn ngữ, ví dụ
+`phim.vi.srt`. Mã hỗ trợ: `zh` (Trung), `vi` (Việt), `ja` (Nhật), `en` (Anh);
+`und` khi không có chữ để xác định. Chú thích/tin nhắn được đưa vào tệp theo
+ngôn ngữ của chính nội dung đó. Với `--lang auto`, tiếng Việt có dấu được nhận
+theo dấu; câu tiếng Việt không dấu và câu tiếng Nhật chỉ có Hán tự có thể bị
+phân nhầm vì OCR hiện không trả nhãn ngôn ngữ cho từng dòng.
+
 **Câu chú thích/biên tập** (ví dụ "Hà Nội, 1975" ở đầu màn hình) được đọc riêng
 với hội thoại, trong các vùng `captions.zones` (mặc định 35% phía trên khung hình,
 đã trừ vùng hội thoại). `--captions merged` (mặc định) ghi chung vào SRT với thẻ
-`{\an8}` để hiện ở đầu màn hình; `--captions separate` ghi ra `<tên video>.captions.srt`;
-`--captions off` chỉ lấy hội thoại. Chữ chỉ được giữ khi giống chữ chèn hậu kỳ:
-đứng yên, nằm ngang, kéo dài 1–15 giây, đọc rõ, cỡ chữ gần cỡ phụ đề. Bị loại:
+`{\an8}` để hiện ở đầu màn hình; nội dung ngoài lời thoại đặt trong ngoặc tròn.
+`--captions separate` ghi ra `<tên video>.<mã ngôn ngữ>.captions.srt`;
+`--captions off` chỉ lấy hội thoại. Chữ chèn hậu kỳ được giữ khi đứng yên,
+kéo dài 1–15 giây và OCR đọc rõ. Chú thích thông thường cần nằm ngang và có
+cỡ chữ gần cỡ phụ đề. Chữ Hán dọc giới thiệu nhân vật được nhận riêng; hai
+cột liền nhau được ghép thành một mục, ví dụ `(赵丽颖：金鸡奖影后)`. Bị loại:
 logo đứng yên cả video, logo động lặp đi lặp lại, URL/quảng cáo (`captions.ad_terms`
 và `srt.watermark_terms`), biển hiệu hay chữ trên áo quần (nghiêng hoặc di chuyển
-theo cảnh), chữ quá nhỏ. Số chữ bị loại theo từng lý do được ghi trong log. Bật
+theo cảnh), chữ quá nhỏ hoặc chữ dọc không phải chú thích. Số chữ bị loại theo từng lý do được ghi trong log. Bật
 chú thích làm chậm khoảng 30–40% vì phải giải mã cả khung hình.
 
+**Tin nhắn trên điện thoại/màn hình trong cảnh** được quét ở vùng giữa khung hình
+(`captions.screen_text.zones`, mặc định x=12–88%, y=28–78%). Tool theo dõi chữ
+qua nhiều khung, cho phép điện thoại hơi nghiêng hoặc di chuyển, bỏ dòng đồng hồ,
+tiêu đề ngắn, URL, watermark và logo cố định/lặp lại. Nội dung được ghi vào SRT
+trong ngoặc tròn, ví dụ `(恭喜，终于等到这一天了。)`. Chế độ `--captions off` bỏ qua cả
+chú thích lẫn chữ trên màn hình; `merged` và `separate` áp dụng cho cả hai. Có thể
+chỉnh vùng quét, ngưỡng thời gian và độ tin cậy trong `config.yaml`. Việc quét
+vùng này cần thêm một lượt OCR; tốc độ phụ thuộc video và máy chạy. Với cảnh chữ
+chỉ thoáng qua dưới 0,65 giây hoặc OCR không đọc rõ, tin nhắn có thể bị bỏ qua.
+
 **Dừng giữa chừng:** nhấn `Ctrl+C` một lần để dừng sau khung hình hiện tại. Phụ đề
-đã quét được lưu vào `<tên video>.partial.srt` trong thư mục đầu ra (bỏ qua bước
+đã quét được lưu vào `<tên video>.<mã ngôn ngữ>.partial.srt` trong thư mục đầu ra (bỏ qua bước
 sửa bằng LLM) và các video còn lại trong lô không được xử lý. Nhấn `Ctrl+C` lần nữa
 để thoát ngay mà không lưu. Tệp `.partial.srt` không chặn chế độ chạy tiếp: lần
 chạy sau vẫn xử lý lại video đó từ đầu.
@@ -132,9 +154,10 @@ chạy OCR. Trên ảnh, kéo bên trong khung xanh để di chuyển hoặc ké
 đổi kích thước. Bốn ô tọa độ cập nhật theo khung; sửa các ô cũng làm khung đổi
 ngay mà không phải quét ROI lại. Mọi chỉnh sửa chuyển sang ROI thủ công cho lần
 xử lý tiếp theo. Nút **Bắt đầu xử lý** cập nhật tiến độ và nhật ký. Nút **Dừng và
-lưu** dừng sau khung hình hiện tại và lưu phụ đề đã quét vào `<tên video>.partial.srt`
+lưu** dừng sau khung hình hiện tại và lưu phụ đề đã quét vào các tệp
+`<tên video>.<mã ngôn ngữ>.partial.srt`
 trong thư mục đầu ra; đóng tab trình duyệt khi đang chạy cũng dừng và lưu như vậy. Với một video, giao
-diện hiển thị tệp SRT để tải. Nếu chọn thư mục đầu ra khác, tệp kết quả vẫn
+diện hiển thị các tệp SRT để tải. Nếu chọn thư mục đầu ra khác, tệp kết quả vẫn
 được lưu ở đó; bản phục vụ tải xuống được sao chép vào `web_cache/`.
 
 ## Linux VPS có NVIDIA GPU

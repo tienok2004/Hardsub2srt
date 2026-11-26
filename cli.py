@@ -16,7 +16,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeElapsedColumn
 
 from core.llm_refiner import LLMConfig
-from core.captions import caption_config_from
+from core.captions import caption_config_from, screen_text_config_from
 from core.paths import clean_path_text
 from core.pipeline import PipelineConfig, ProgressEvent, format_clock, run_batch
 from core.roi_detector import ROI
@@ -71,7 +71,7 @@ def _options() -> argparse.Namespace:
     parser.add_argument("--llm-api-key")
     parser.add_argument("--llm-model")
     parser.add_argument("--captions", choices=("merged", "separate", "off"),
-                        help="Chú thích ngoài vùng hội thoại: gộp vào SRT, tệp riêng, hoặc bỏ qua")
+                        help="Chú thích và tin nhắn trên màn hình: gộp vào SRT, tệp riêng, hoặc bỏ qua")
     parser.add_argument("--ffmpeg")
     parser.add_argument("--ffprobe")
     return parser.parse_args()
@@ -135,6 +135,7 @@ def main() -> int:
             skip_unchanged_frames=ocr_settings.get("skip_unchanged_frames", True),
             captions_output=_setting(args.captions, caption_settings.get("output", "merged")),
             captions=caption_config_from(caption_settings, srt_settings.get("watermark_seconds", 15)),
+            screen_text=screen_text_config_from(caption_settings.get("screen_text")),
             builder=builder,
             llm=llm,
             ffmpeg=_executable(args.ffmpeg or video_settings.get("ffmpeg", "ffmpeg"), "ffmpeg"),
@@ -203,7 +204,9 @@ def main() -> int:
     finally:
         signal.signal(signal.SIGINT, previous_handler)
     for result in summary.files:
-        console.print(f"{result.status}: {result.video.name} → {result.output} "
+        paths = result.outputs or (result.output,)
+        console.print(f"{result.status}: {result.video.name} → "
+                      f"{', '.join(str(path) for path in paths)} "
                       f"({result.subtitle_count} phụ đề) {result.message}")
     console.print(f"Tổng kết: {summary.completed} hoàn thành, {summary.skipped} bỏ qua, "
                   f"{summary.failed} lỗi" + (" — đã dừng giữa chừng" if summary.stopped else ""))

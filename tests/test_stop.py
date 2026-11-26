@@ -73,7 +73,7 @@ class StopTests(unittest.TestCase):
         self.assertEqual([item.video.name for item in summary.files], ["a.mp4"])  # b.mp4 not started
         result = summary.files[0]
         self.assertEqual(result.status, "stopped")
-        self.assertEqual(result.output, partial_output_path(self.output / "a.srt"))
+        self.assertEqual(result.output, partial_output_path(self.output / "a.vi.srt"))
         self.assertEqual(engine.calls, 15)
         self.assertEqual(self.closed, [True])  # decoder closed right away
 
@@ -82,7 +82,7 @@ class StopTests(unittest.TestCase):
         self.assertIn("Tạm biệt", text)
         self.assertIn("Hẹn gặp lại", text)
         self.assertEqual(result.subtitle_count, 3)
-        self.assertFalse((self.output / "a.srt").exists())  # resume will redo this video
+        self.assertFalse((self.output / "a.vi.srt").exists())  # resume will redo this video
         self.assertEqual(events[-1].phase, "stopped")
 
     def test_stop_before_any_frame_writes_nothing(self) -> None:
@@ -95,8 +95,8 @@ class StopTests(unittest.TestCase):
     def test_without_stop_writes_normal_srt(self) -> None:
         summary, _ = self._run(threading.Event(), _StopAfter(threading.Event(), frames=10**9))
         self.assertEqual(summary.completed, 2)
-        self.assertTrue((self.output / "a.srt").is_file())
-        self.assertFalse(partial_output_path(self.output / "a.srt").exists())
+        self.assertTrue((self.output / "a.vi.srt").is_file())
+        self.assertFalse(partial_output_path(self.output / "a.vi.srt").exists())
 
 
 if __name__ == "__main__":
