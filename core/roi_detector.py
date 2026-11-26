@@ -108,10 +108,12 @@ def _best_roi(
     def looks_static(item: _Cluster) -> bool:
         if len(item.frame_ids) < 3 or max(item.times) - min(item.times) <= 15:
             return False
-        # Fixed logos and URL overlays keep all four edges nearly unchanged.
+        # Fixed logos and URL overlays keep all four edges nearly unchanged: it is
+        # the same text every time. Centered dialogue lines of similar length can
+        # stay within a few percent too, so the tolerance must stay tight.
         spans = [max(box[axis] for box in item.boxes) - min(box[axis] for box in item.boxes)
                  for axis in range(4)]
-        if spans[0] < 0.08 and spans[2] < 0.08 and spans[1] < 0.04 and spans[3] < 0.04:
+        if spans[0] < 0.02 and spans[2] < 0.02 and spans[1] < 0.015 and spans[3] < 0.015:
             return True
         center_x = sum(point[0] for point in item.centers) / len(item.centers)
         center_y = sum(point[1] for point in item.centers) / len(item.centers)
@@ -126,12 +128,17 @@ def _best_roi(
         return None
     # Prefer repeated text near the horizontal center. Corner logos can be
     # frequent even when their edges vary slightly with compression.
+    # Dialogue sits in the lower part of the frame in practically every film,
+    # while editorial captions ("Hà Nội, 1975") often sit at the top and can stay
+    # on screen longer than any single dialogue line. Weighting the lower band
+    # keeps such a caption from being chosen as the dialogue area; captions are
+    # read separately (core/captions.py).
     def rank(item: _Cluster) -> float:
         cx = sum(point[0] for point in item.centers) / len(item.centers)
         cy = sum(point[1] for point in item.centers) / len(item.centers)
         center_bonus = 0 if item.vertical else 5 * (1 - min(1.0, 2 * abs(cx - 0.5)))
-        lower_bonus = 2 if not item.vertical and 0.55 <= cy <= 0.9 else 0
-        return len(item.frame_ids) + center_bonus + lower_bonus
+        lower_weight = 1.6 if not item.vertical and 0.55 <= cy <= 0.95 else 1.0
+        return len(item.frame_ids) * lower_weight + center_bonus
 
     best = max(eligible, key=rank)
     x1 = max(0.0, min(box[0] for box in best.boxes) - padding_ratio)

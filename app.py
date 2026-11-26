@@ -18,6 +18,7 @@ from PIL import Image
 
 from core.llm_refiner import LLMConfig
 from core.ocr_engine import OCREngine
+from core.captions import caption_config_from
 from core.paths import clean_path_text, pick_local_path
 from core.pipeline import BatchSummary, PipelineConfig, ProgressEvent, format_clock, run_batch
 from core.roi_detector import ROI, detect_roi
@@ -88,7 +89,7 @@ def _config(
     recursive: bool, preserve: bool, overwrite: bool, auto_roi: bool,
     x_min: float, y_min: float, x_max: float, y_max: float,
     watermark_text: str | None, llm_enabled: bool, llm_base_url: str | None,
-    llm_api_key: str | None, llm_model: str | None,
+    llm_api_key: str | None, llm_model: str | None, captions_output: str = "merged",
 ) -> PipelineConfig:
     output_value = clean_path_text(output_text)
     if not output_value:
@@ -110,6 +111,8 @@ def _config(
         prefer_gpu=DEFAULTS.get("ocr", {}).get("prefer_gpu", True),
         ocr_model_size=DEFAULTS.get("ocr", {}).get("model_size", "small"),
         skip_unchanged_frames=DEFAULTS.get("ocr", {}).get("skip_unchanged_frames", True),
+        captions_output=captions_output,
+        captions=caption_config_from(DEFAULTS.get("captions"), srt_cfg.get("watermark_seconds", 15)),
         builder=BuilderConfig(
             similarity_threshold=srt_cfg.get("similarity_threshold", 85),
             watermark_seconds=srt_cfg.get("watermark_seconds", 15),
@@ -224,13 +227,14 @@ def run_ui(
     recursive: bool, preserve: bool, overwrite: bool, auto_roi: bool,
     x_min: float, y_min: float, x_max: float, y_max: float,
     watermark_text: str | None, llm_enabled: bool, llm_base_url: str | None,
-    llm_api_key: str | None, llm_model: str | None,
+    llm_api_key: str | None, llm_model: str | None, captions_output: str = "merged",
 ) -> Iterator[tuple[str, str, str | None, str | None]]:
     """Stream live events from the blocking pipeline into Gradio outputs."""
     try:
         config = _config(path_text, uploaded, output_text, language, fps, recursive,
                          preserve, overwrite, auto_roi, x_min, y_min, x_max, y_max,
-                         watermark_text, llm_enabled, llm_base_url, llm_api_key, llm_model)
+                         watermark_text, llm_enabled, llm_base_url, llm_api_key, llm_model,
+                         captions_output)
     except Exception as exc:
         yield f"Lỗi cấu hình: {exc}", str(exc), None, None
         return
@@ -416,6 +420,12 @@ def build_app(local_mode: bool = False) -> gr.Blocks:
         watermark_terms = gr.Textbox(value=", ".join(DEFAULTS.get("srt", {}).get("watermark_terms", [])),
                                     label="Từ khóa watermark cần bỏ qua (ngăn cách bằng dấu phẩy)",
                                     placeholder="Ví dụ: tên logo")
+        captions_output = gr.Dropdown(
+            choices=[("Gộp vào tệp SRT (hiện ở đầu màn hình)", "merged"),
+                     ("Lưu tệp riêng <tên>.captions.srt", "separate"), ("Bỏ qua", "off")],
+            value=DEFAULTS.get("captions", {}).get("output", "merged"),
+            label="Câu chú thích/biên tập ngoài vùng hội thoại (tự loại logo, quảng cáo, biển hiệu)",
+        )
         with gr.Accordion("Sửa lỗi OCR bằng LLM (tùy chọn)", open=False):
             llm_enabled = gr.Checkbox(value=False, label="Bật sửa OCR bằng LLM")
             llm_base_url = gr.Textbox(label="Base URL", placeholder="http://localhost:11434/v1")
@@ -447,7 +457,7 @@ def build_app(local_mode: bool = False) -> gr.Blocks:
             run_ui,
             inputs=[input_path, upload, output_dir, language, fps, recursive, preserve,
                     overwrite, auto_roi, x_min, y_min, x_max, y_max, watermark_terms,
-                    llm_enabled, llm_base_url, llm_api_key, llm_model],
+                    llm_enabled, llm_base_url, llm_api_key, llm_model, captions_output],
             outputs=[status, logs, preview_image, download],
             show_progress="hidden",
         )

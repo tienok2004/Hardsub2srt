@@ -56,7 +56,8 @@ class StopTests(unittest.TestCase):
         metadata = lambda video, **_: VideoMetadata(video, 1920, 1080, 60.0, 24.0, None)
         roi = lambda video, _engine, **kw: ROIResult(ROI(0, 0.7, 1, 1), "manual", 0, 0,
                                                     kw["preview_path"], "ROI thủ công")
-        config = PipelineConfig(self.source, self.output, fps=FPS, skip_unchanged_frames=False)
+        config = PipelineConfig(self.source, self.output, fps=FPS, skip_unchanged_frames=False,
+                                captions_output="off")  # fake frames are too small to crop
         with patch("core.pipeline.probe_video", metadata), patch("core.pipeline.detect_roi", roi), \
                 patch("core.pipeline.sample_frames", self._frames):
             events = []

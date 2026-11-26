@@ -96,6 +96,17 @@ ghi đè. Một video lỗi không dừng các video khác. Dùng `--roi x_min y
 Nếu logo ngắn vẫn lọt vào SRT, dùng `--watermark-term 'tên logo'` (lặp lại được)
 hoặc khai báo `srt.watermark_terms` trong `config.yaml`.
 
+**Câu chú thích/biên tập** (ví dụ "Hà Nội, 1975" ở đầu màn hình) được đọc riêng
+với hội thoại, trong các vùng `captions.zones` (mặc định 35% phía trên khung hình,
+đã trừ vùng hội thoại). `--captions merged` (mặc định) ghi chung vào SRT với thẻ
+`{\an8}` để hiện ở đầu màn hình; `--captions separate` ghi ra `<tên video>.captions.srt`;
+`--captions off` chỉ lấy hội thoại. Chữ chỉ được giữ khi giống chữ chèn hậu kỳ:
+đứng yên, nằm ngang, kéo dài 1–15 giây, đọc rõ, cỡ chữ gần cỡ phụ đề. Bị loại:
+logo đứng yên cả video, logo động lặp đi lặp lại, URL/quảng cáo (`captions.ad_terms`
+và `srt.watermark_terms`), biển hiệu hay chữ trên áo quần (nghiêng hoặc di chuyển
+theo cảnh), chữ quá nhỏ. Số chữ bị loại theo từng lý do được ghi trong log. Bật
+chú thích làm chậm khoảng 30–40% vì phải giải mã cả khung hình.
+
 **Dừng giữa chừng:** nhấn `Ctrl+C` một lần để dừng sau khung hình hiện tại. Phụ đề
 đã quét được lưu vào `<tên video>.partial.srt` trong thư mục đầu ra (bỏ qua bước
 sửa bằng LLM) và các video còn lại trong lô không được xử lý. Nhấn `Ctrl+C` lần nữa

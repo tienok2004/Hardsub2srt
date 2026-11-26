@@ -22,6 +22,21 @@ ocr:
   prefer_gpu: true
   model_size: small  # PP-OCRv6 multilingual model
   skip_unchanged_frames: true  # reuse OCR text while the subtitle area is unchanged
+captions:
+  # Editorial captions outside the dialogue area ("Hà Nội, 1975", "Ba năm sau").
+  # merged: same SRT, shown at the top ({\an8}); separate: <name>.captions.srt; off: dialogue only
+  output: merged
+  zones: [[0.0, 0.0, 1.0, 0.35]]  # [x_min, y_min, x_max, y_max]; the dialogue band is cut out
+  min_seconds: 1.0         # shorter text is ignored
+  max_seconds: 15.0        # longer at one spot = logo/watermark
+  max_jitter: 0.012        # text drifting more than this moves with the scene (signs, clothing)
+  max_angle_degrees: 3.0   # tilted text = scene text
+  min_confidence: 0.80
+  max_repeats: 3           # same text appearing this many times = animated logo / recurring ad
+  ad_terms: [www, http, .com, .net, .vn, .tv, .cc, .top, .app, subscribe, "đăng ký kênh",
+             "theo dõi kênh", "tải app", "xem phim tại", "xem full tại", "phim mới tại", hotline,
+             zalo, tiktok, facebook, youtube, fanpage, telegram, 关注, 订阅, 下载, 官网, 抖音, 微博,
+             公众号, 快手]
 srt:
   similarity_threshold: 85
   watermark_seconds: 15.0

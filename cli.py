@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeElapsedColumn
 
 from core.llm_refiner import LLMConfig
+from core.captions import caption_config_from
 from core.paths import clean_path_text
 from core.pipeline import PipelineConfig, ProgressEvent, format_clock, run_batch
 from core.roi_detector import ROI
@@ -69,6 +70,8 @@ def _options() -> argparse.Namespace:
     parser.add_argument("--llm-base-url")
     parser.add_argument("--llm-api-key")
     parser.add_argument("--llm-model")
+    parser.add_argument("--captions", choices=("merged", "separate", "off"),
+                        help="Chú thích ngoài vùng hội thoại: gộp vào SRT, tệp riêng, hoặc bỏ qua")
     parser.add_argument("--ffmpeg")
     parser.add_argument("--ffprobe")
     return parser.parse_args()
@@ -90,6 +93,7 @@ def main() -> int:
         ocr_settings = settings.get("ocr", {})
         srt_settings = settings.get("srt", {})
         llm_settings = settings.get("llm", {})
+        caption_settings = settings.get("captions", {})
         output = args.output or Path(output_settings.get("directory", "output"))
         if not output.is_absolute():
             output = config_path.parent / output
@@ -129,6 +133,8 @@ def main() -> int:
             prefer_gpu=ocr_settings.get("prefer_gpu", True),
             ocr_model_size=ocr_settings.get("model_size", "small"),
             skip_unchanged_frames=ocr_settings.get("skip_unchanged_frames", True),
+            captions_output=_setting(args.captions, caption_settings.get("output", "merged")),
+            captions=caption_config_from(caption_settings, srt_settings.get("watermark_seconds", 15)),
             builder=builder,
             llm=llm,
             ffmpeg=_executable(args.ffmpeg or video_settings.get("ffmpeg", "ffmpeg"), "ffmpeg"),

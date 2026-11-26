@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import statistics
 import threading
 import time
 from collections import deque
@@ -12,15 +13,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
+
+from .captions import CaptionConfig, CaptionFrame, CaptionText, angle_of, build_captions, merge_entries
 from .frame_change import FrameChangeDetector
 from .llm_refiner import LLMConfig, refine_subtitles
 from .ocr_engine import OCREngine, RecognizedText
 from .roi_detector import FULL_FRAME, ROI, ROIResult, detect_roi
 from .srt_builder import BuilderConfig, build_subtitles, frame_from_ocr, write_srt
-from .video_sampler import probe_video, sample_frames
+from .video_sampler import SampledFrame, probe_video, sample_frames
 
 LOGGER = logging.getLogger(__name__)
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"})
+# merged: captions in the same SRT (top-tagged); separate: <name>.captions.srt; off: dialogue only.
+CAPTION_OUTPUTS = ("merged", "separate", "off")
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,8 @@ class PipelineConfig:
     prefer_gpu: bool = True
     ocr_model_size: str = "small"
     skip_unchanged_frames: bool = True
+    captions_output: str = "merged"
+    captions: CaptionConfig = field(default_factory=CaptionConfig)
     builder: BuilderConfig = field(default_factory=BuilderConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     ffmpeg: str = "ffmpeg"
@@ -52,6 +60,8 @@ class PipelineConfig:
             raise ValueError("FPS lấy mẫu phải nằm trong (0, 10]")
         if self.language not in {"auto", "ch", "vi", "ja", "en"}:
             raise ValueError("Ngôn ngữ OCR không hợp lệ")
+        if self.captions_output not in CAPTION_OUTPUTS:
+            raise ValueError(f"captions_output phải là một trong {CAPTION_OUTPUTS}")
 
 
 @dataclass(frozen=True)
@@ -149,6 +159,44 @@ def partial_output_path(output: Path) -> Path:
     return output.with_name(output.stem + ".partial.srt")
 
 
+def _caption_zones(roi: ROI, zones: tuple[tuple[float, float, float, float], ...]) -> list[ROI]:
+    """Caption search areas, with the dialogue band cut out of them."""
+    result = []
+    for x1, y1, x2, y2 in zones:
+        if y2 > roi.y_min - 0.01 and y1 < roi.y_max + 0.01:
+            above = (y1, min(y2, roi.y_min - 0.01))
+            below = (max(y1, roi.y_max + 0.01), y2)
+            y1, y2 = max(above, below, key=lambda part: part[1] - part[0])
+        if y2 - y1 >= 0.05:
+            result.append(ROI(x1, y1, x2, y2))
+    return result
+
+
+def _crop(frame: SampledFrame, box: tuple[int, int, int, int]) -> SampledFrame:
+    x1, y1, x2, y2 = box
+    pixels = np.frombuffer(frame.rgb24, dtype=np.uint8).reshape(frame.height, frame.width, 3)
+    part = np.ascontiguousarray(pixels[y1:y2, x1:x2])
+    return SampledFrame(frame.timestamp_seconds, x2 - x1, y2 - y1, part.tobytes())
+
+
+def _as_caption(line: RecognizedText, origin: tuple[int, int], width: int, height: int) -> CaptionText:
+    """Move a line read inside a crop into full-frame normalized coordinates."""
+    x1, y1, x2, y2 = line.box.bounds
+    ox, oy = origin
+    return CaptionText(line.text, line.score,
+                       ((ox + x1) / width, (oy + y1) / height, (ox + x2) / width, (oy + y2) / height),
+                       angle_of(line.box.points))
+
+
+def _write_outputs(dialogue: list, captions: list, destination: Path, mode: str) -> list[Path]:
+    if mode == "merged":
+        return [write_srt(merge_entries(dialogue, captions), destination)]
+    written = [write_srt(dialogue, destination)]
+    if mode == "separate" and captions:
+        written.append(write_srt(captions, destination.with_name(destination.stem + ".captions.srt")))
+    return written
+
+
 def format_clock(seconds: float) -> str:
     seconds = max(0, int(round(seconds)))
     return f"{seconds // 3600:d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
@@ -234,6 +282,17 @@ def _process_one(
                                roi=roi, message=detected.message,
                                preview_path=detected.preview_path))
     crop = None if roi == FULL_FRAME else roi.pixels(info.width, info.height)
+    # Captions need the rest of the frame, so FFmpeg sends whole frames and the
+    # dialogue band and caption zones are cut out here. Full-frame mode already
+    # reads everything as dialogue.
+    read_captions = config.captions_output != "off" and crop is not None
+    zones = [zone.pixels(info.width, info.height)
+             for zone in _caption_zones(roi, config.captions.zones)] if read_captions else []
+    zone_detectors = [FrameChangeDetector() if config.skip_unchanged_frames else None for _ in zones]
+    zone_lines: list[list[CaptionText]] = [[] for _ in zones]
+    caption_frames: list[CaptionFrame] = []
+    dialogue_heights: list[float] = []
+    off_anchor: list[CaptionText] = []
     observations = []
     count = 0
     reused = 0
@@ -242,48 +301,78 @@ def _process_one(
     ocr_started = time.perf_counter()
     eta = EtaEstimator(math.ceil(info.duration_seconds * config.fps))
     stopped = False
-    frames = sample_frames(video, fps=config.fps, ffmpeg=config.ffmpeg, metadata=info, crop=crop)
+    frames = sample_frames(video, fps=config.fps, ffmpeg=config.ffmpeg, metadata=info,
+                           crop=None if read_captions else crop)
     with closing(frames):  # Closing the generator stops FFmpeg right away.
-        for frame in frames:
+        for whole in frames:
             if stop_requested():
                 stopped = True
                 break
+            frame = _crop(whole, crop) if read_captions else whole
             if change_detector is None or change_detector.changed(frame):
                 recognized = engine.recognize(frame)
                 if detected.mode == "auto" and crop is not None:
-                    recognized = _near_roi_anchor(recognized, roi, frame.width)
+                    kept = _near_roi_anchor(recognized, roi, frame.width)
+                    # Off-centre text in the dialogue band (e.g. a caption at the
+                    # bottom-left) is checked as a caption instead of dropped.
+                    off_anchor = [_as_caption(line, crop[:2], info.width, info.height)
+                                  for line in recognized if line not in kept] if read_captions else []
+                    recognized = kept
+                # Reference font size for captions; only confident, real words, so
+                # stray boxes from the picture do not drag the median down.
+                dialogue_heights.extend((line.box.bounds[3] - line.box.bounds[1]) / info.height
+                                        for line in recognized
+                                        if line.score >= 0.8 and sum(ch.isalpha() for ch in line.text) >= 2)
             else:
                 reused += 1  # Subtitle area unchanged: same text, new timestamp.
             observations.append(frame_from_ocr(frame.timestamp_seconds, frame.width, frame.height, recognized))
+            if read_captions:
+                for index, (box, detector) in enumerate(zip(zones, zone_detectors)):
+                    zone_frame = _crop(whole, box)
+                    if detector is None or detector.changed(zone_frame):
+                        zone_lines[index] = [_as_caption(line, box[:2], info.width, info.height)
+                                             for line in engine.recognize(zone_frame)]
+                caption_frames.append(CaptionFrame(
+                    whole.timestamp_seconds,
+                    tuple(off_anchor) + tuple(text for lines in zone_lines for text in lines)))
             count += 1
             if callback and (count == 1 or count % 10 == 0):
                 elapsed = max(1e-9, time.perf_counter() - ocr_started)
                 callback(ProgressEvent(video, "ocr", count, info.duration_seconds,
                                        count / elapsed, roi, eta_seconds=eta.update(count)))
     entries = build_subtitles(observations, config=config.builder, sample_fps=config.fps)
+    caption_entries, caption_rejects = build_captions(
+        caption_frames, interval=1 / config.fps, config=config.captions,
+        dialogue_height=statistics.median(dialogue_heights) if dialogue_heights else None,
+        watermark_terms=config.builder.watermark_terms,
+    ) if read_captions else ([], {})
+    if caption_rejects:
+        LOGGER.info("%s: bỏ qua chữ ngoài phụ đề: %s", video.name,
+                    ", ".join(f"{reason} ×{n}" for reason, n in caption_rejects.items()))
+    caption_note = f" + {len(caption_entries)} chú thích" if read_captions else ""
     if stopped:
         # Save what was read so far; skip the optional LLM pass so stopping stays fast.
         partial = partial_output_path(output)
-        write_srt(entries, partial)
+        _write_outputs(entries, caption_entries, partial, config.captions_output)
         scanned = count / config.fps
         message = (f"Đã dừng ở {format_clock(scanned)}/{format_clock(info.duration_seconds)}; "
-                   f"lưu {len(entries)} phụ đề vào {partial.name}")
+                   f"lưu {len(entries)} phụ đề{caption_note} vào {partial.name}")
         if callback:
             callback(ProgressEvent(video, "stopped", count, info.duration_seconds,
                                    count / max(time.perf_counter() - ocr_started, 1e-9), roi,
                                    message, detected.preview_path))
         return FileResult(video, partial, "stopped", len(entries), count,
                           time.perf_counter() - started, roi, message)
-    entries = refine_subtitles(entries, config.llm)
-    write_srt(entries, output)
+    entries = refine_subtitles(entries, config.llm)  # dialogue only; captions are short and exact
+    _write_outputs(entries, caption_entries, output, config.captions_output)
     elapsed = time.perf_counter() - started
     if callback:
         callback(ProgressEvent(video, "done", count, info.duration_seconds,
                                count / max(time.perf_counter() - ocr_started, 1e-9), roi,
-                               f"{len(entries)} phụ đề; OCR {count - reused}/{count} khung hình",
+                               f"{len(entries)} phụ đề{caption_note}; OCR {count - reused}/{count} khung hình",
                                detected.preview_path))
     return FileResult(video, output, "completed", len(entries), count, elapsed, roi,
-                      f"{len(entries)} phụ đề; {detected.message}")
+                      f"{len(entries)} phụ đề{caption_note}; {detected.message}")
 
 
 def run_batch(
