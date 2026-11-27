@@ -23,7 +23,8 @@ from .language_split import LANGUAGE_CODES, split_entries, split_observations
 from .llm_refiner import LLMConfig, refine_subtitles
 from .ocr_engine import OCREngine, RecognizedText
 from .roi_detector import FULL_FRAME, ROI, ROIResult, detect_roi
-from .srt_builder import BuilderConfig, FrameObservation, SubtitleEntry, build_subtitles, frame_from_ocr, write_srt
+from .srt_builder import (BuilderConfig, FrameObservation, SubtitleEntry, build_subtitles,
+                          frame_from_ocr, remove_watermarks, write_srt)
 from .video_sampler import SampledFrame, probe_video, sample_frames
 
 LOGGER = logging.getLogger(__name__)
@@ -420,6 +421,7 @@ def _process_one(
             for screen in screen_entries)]
     if crop is None:
         observations = _without_screen_region(observations, screen_entries, screen_areas)
+    observations = remove_watermarks(observations, config=config.builder, sample_fps=config.fps)
     language_frames, primary = split_observations(observations, selected_language=config.language)
     dialogue_by_language = {
         language: build_subtitles(frames, config=config.builder, sample_fps=config.fps)

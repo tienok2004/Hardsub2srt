@@ -38,6 +38,11 @@ def frame_from_ocr(
     texts = []
     for line in lines:
         x1, y1, x2, y2 = line.box.bounds
+        # RapidOCR occasionally returns one low-confidence box covering the
+        # entire crop when no text is present (seen with moving overlays).
+        if (line.score < 0.85 and (x2 - x1) / width > 0.5
+                and (y2 - y1) / height > 0.9):
+            continue
         texts.append(TextObservation(
             line.text, line.score,
             (max(0.0, x1 / width), max(0.0, y1 / height),
@@ -86,7 +91,8 @@ def _normalized(text: str) -> str:
 def _looks_like_url(text: str) -> bool:
     value = text.strip().casefold()
     return (value.startswith(("http", "www."))
-            or bool(re.search(r"\b[a-z0-9-]+\.(?:com|cc|org|net|top|app)\b", value)))
+            or bool(re.search(r"\b[a-z0-9-]+\.(?:com|cc|org|net|top|app)\b", value))
+            or bool(re.search(r"\b[a-z0-9À-ỹ-]{4,}\.[a-z]{2,3}\b", value)))
 
 
 def _same_position(a: TextObservation, b: TextObservation, tolerance: float) -> bool:
@@ -141,6 +147,105 @@ def _watermark_indexes(
         tracks = continued
     for track in tracks:
         finish(track)
+    return removed | _recurring_watermark_indexes(frames, interval, config)
+
+
+def _recurring_watermark_indexes(
+    frames: Sequence[FrameObservation], interval: float, config: BuilderConfig,
+) -> set[tuple[int, int]]:
+    """Find short logo text recurring across the video despite OCR gaps and motion.
+
+    A dialogue line can stay on screen for several samples or recur later. Require
+    many separate appearances beside a domain or a single-letter brand badge
+    before learning a site logo. Then remove short OCR fragments of that logo.
+    """
+    sightings: dict[str, list[int]] = {}
+    logo_boxes: dict[str, list[tuple[float, float, float, float]]] = {}
+    for frame_index, frame in enumerate(frames):
+        for item in frame.texts:
+            value = re.sub(r"\W+", "", _normalized(item.text))
+            if 4 <= len(value) <= 18 and not _looks_like_url(value):
+                sightings.setdefault(value, []).append(frame_index)
+                if item.box is not None:
+                    logo_boxes.setdefault(value, []).append(item.box)
+
+    if not frames:
+        return set()
+    video_span = frames[-1].timestamp_seconds - frames[0].timestamp_seconds + interval
+    minimum_samples = max(8, math.ceil(len(frames) * 0.08))
+    logos = []
+    for value, indexes in sightings.items():
+        unique = sorted(set(indexes))
+        if len(unique) < minimum_samples:
+            continue
+        span = frames[unique[-1]].timestamp_seconds - frames[unique[0]].timestamp_seconds
+        if span < max(config.watermark_seconds * 2, video_span * 0.25):
+            continue
+        appearances = 1 + sum(current - previous > 2 for previous, current in zip(unique, unique[1:]))
+        url_support = 0
+        badge_support = 0
+        for frame_index in unique:
+            candidates = [item for item in frames[frame_index].texts
+                          if re.sub(r"\W+", "", _normalized(item.text)) == value
+                          and item.box is not None]
+            if any(abs((item.box[1] + item.box[3] - other.box[1] - other.box[3]) / 2) <= 0.08
+                   and item.box[0] <= other.box[2] + 0.06
+                   and other.box[0] <= item.box[2] + 0.06
+                   for item in candidates for other in frames[frame_index].texts
+                   if other.box is not None and _looks_like_url(other.text)):
+                url_support += 1
+            if any(abs((item.box[1] + item.box[3] - other.box[1] - other.box[3]) / 2) <= 0.06
+                   and item.box[0] <= other.box[2] + 0.04
+                   and other.box[0] <= item.box[2] + 0.04
+                   for item in candidates for other in frames[frame_index].texts
+                   if other.box is not None and len(re.sub(r"\W+", "", _normalized(other.text))) == 1):
+                badge_support += 1
+        if appearances >= 3 and (url_support >= 1 or badge_support >= 3):
+            logos.append(value)
+
+    removed: set[tuple[int, int]] = set()
+    for frame_index, frame in enumerate(frames):
+        for text_index, item in enumerate(frame.texts):
+            value = re.sub(r"\W+", "", _normalized(item.text))
+            for logo in logos:
+                if 2 <= len(value) <= len(logo) and (
+                    (value in logo and len(value) >= len(logo) / 2)
+                    or ratio(value, logo) >= 75
+                ):
+                    removed.add((frame_index, text_index))
+                    break
+                # A single character is too ambiguous without spatial evidence.
+                if len(value) == 1 and value in logo and item.box is not None and any(
+                    box[0] - 0.02 <= (item.box[0] + item.box[2]) / 2 <= box[2] + 0.02
+                    and box[1] - 0.02 <= (item.box[1] + item.box[3]) / 2 <= box[3] + 0.02
+                    for box in logo_boxes.get(logo, ())
+                ):
+                    removed.add((frame_index, text_index))
+                    break
+    # A brand icon is often read as a separate single letter next to its name.
+    # Learn that companion only when it repeatedly appears beside a logo box.
+    companion_counts: dict[str, int] = {}
+    companion_totals: dict[str, int] = {}
+    for frame_index, frame in enumerate(frames):
+        logo_in_frame = [item.box for index, item in enumerate(frame.texts)
+                         if (frame_index, index) in removed and item.box is not None
+                         and len(re.sub(r"\W+", "", _normalized(item.text))) >= 3]
+        for item in frame.texts:
+            value = re.sub(r"\W+", "", _normalized(item.text))
+            if len(value) != 1 or item.box is None:
+                continue
+            companion_totals[value] = companion_totals.get(value, 0) + 1
+            if any(abs((item.box[1] + item.box[3] - box[1] - box[3]) / 2) <= 0.06
+                   and item.box[0] <= box[2] + 0.04 and box[0] <= item.box[2] + 0.04
+                   for box in logo_in_frame):
+                companion_counts[value] = companion_counts.get(value, 0) + 1
+    companions = {value for value, count in companion_counts.items()
+                  if count >= 3 and count / companion_totals[value] >= 0.5}
+    if companions:
+        removed.update((frame_index, text_index)
+                       for frame_index, frame in enumerate(frames)
+                       for text_index, item in enumerate(frame.texts)
+                       if re.sub(r"\W+", "", _normalized(item.text)) in companions)
     return removed
 
 
@@ -157,6 +262,25 @@ def _frame_text(frame: FrameObservation, frame_index: int, removed: set[tuple[in
     text = "\n".join(item.text.strip() for item in present)
     confidence = sum(max(0.0, min(1.0, item.confidence)) for item in present) / len(present)
     return text, confidence
+
+
+def remove_watermarks(
+    frames: Sequence[FrameObservation], *, config: BuilderConfig | None = None,
+    sample_fps: float = 3.0,
+) -> list[FrameObservation]:
+    """Remove logo lines while all OCR scripts are still in the same frames."""
+    if not frames:
+        return []
+    if not math.isfinite(sample_fps) or sample_fps <= 0:
+        raise ValueError("sample_fps phải là số dương hữu hạn")
+    cfg = config or BuilderConfig()
+    ordered = sorted(frames, key=lambda frame: frame.timestamp_seconds)
+    interval = _sample_interval(ordered, 1 / sample_fps)
+    removed = _watermark_indexes(ordered, interval, cfg)
+    return [FrameObservation(frame.timestamp_seconds,
+                             tuple(item for text_index, item in enumerate(frame.texts)
+                                   if (frame_index, text_index) not in removed))
+            for frame_index, frame in enumerate(ordered)]
 
 
 def build_subtitles(

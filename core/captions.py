@@ -184,6 +184,21 @@ def _is_ad(text: str, terms: Iterable[str]) -> bool:
     return _looks_like_url(value) or any(term.casefold() in value for term in terms if term.strip())
 
 
+def _beside_site_address(track: _Track, frames: Sequence[CaptionFrame]) -> bool:
+    """A short name printed beside a domain is usually a site badge."""
+    if _letters(track.best().text) > 12:
+        return False
+    matches = 0
+    for frame_index, _, text in track.items:
+        if any(_looks_like_url(other.text)
+               and abs((text.box[1] + text.box[3] - other.box[1] - other.box[3]) / 2) <= 0.07
+               and text.box[0] <= other.box[2] + 0.06
+               and other.box[0] <= text.box[2] + 0.06
+               for other in frames[frame_index].texts):
+            matches += 1
+    return matches >= min(2, len(track.items))
+
+
 def _tracks(frames: Sequence[CaptionFrame], *, min_iou: float = 0.4,
             min_similarity: float = 80) -> list[_Track]:
     finished: list[_Track] = []
@@ -259,6 +274,8 @@ def build_captions(
     accepted: list[_Track] = []
     for track in tracks:
         reason = _rejection(track, interval, cfg, dialogue_height, watermark_terms)
+        if reason is None and _beside_site_address(track, ordered):
+            reason = "logo cạnh địa chỉ web"
         if reason is None:
             accepted.append(track)
         elif reason != "quá ngắn":
@@ -329,7 +346,8 @@ def build_screen_text(
     cfg = config or ScreenTextConfig()
     if not cfg.enabled:
         return [], {}
-    tracks = _tracks(sorted(frames, key=lambda frame: frame.timestamp_seconds),
+    ordered = sorted(frames, key=lambda frame: frame.timestamp_seconds)
+    tracks = _tracks(ordered,
                      min_iou=0.2, min_similarity=75)
     rejected: dict[str, int] = {}
     accepted: list[_Track] = []
@@ -347,6 +365,8 @@ def build_screen_text(
         elif _is_ad(best.text, ad_terms) or any(
                 term.casefold() in best.text.casefold() for term in watermark_terms if term.strip()):
             reason = "quảng cáo / watermark"
+        elif _beside_site_address(track, ordered):
+            reason = "logo cạnh địa chỉ web"
         elif statistics.mean(text.confidence for text in texts) < cfg.min_confidence:
             reason = "độ tin cậy thấp"
         elif abs(statistics.median(text.angle_degrees for text in texts)) > cfg.max_angle_degrees:

@@ -174,6 +174,15 @@ class CaptionHelpersTests(unittest.TestCase):
 
 
 class ScreenTextTests(unittest.TestCase):
+    def test_site_name_beside_domain_is_not_a_screen_message(self):
+        frames = _frames(5, lambda t: [
+            _text("H薰豆短居", x=0.35, y=0.43, width=0.3, height=0.06),
+            _text("hddj30.com", x=0.44, y=0.49, width=0.2, height=0.03),
+        ] if 1 <= t < 3 else [])
+        entries, reasons = build_screen_text(frames, interval=INTERVAL)
+        self.assertEqual(entries, [])
+        self.assertIn("logo cạnh địa chỉ web", reasons)
+
     def test_phone_message_is_parenthesized_while_logos_and_headers_are_ignored(self):
         def texts(t):
             result = [_text("xunse.org", x=0.02, y=0.01, height=0.035),

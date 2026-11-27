@@ -6,7 +6,7 @@ from pathlib import Path
 
 from core.srt_builder import (
     BuilderConfig, FrameObservation, SubtitleEntry, TextObservation,
-    build_subtitles, format_srt, frame_from_ocr, write_srt,
+    build_subtitles, format_srt, frame_from_ocr, remove_watermarks, write_srt,
 )
 from core.ocr_engine import RecognizedText, TextBox
 
@@ -66,12 +66,57 @@ class SubtitleBuilderTests(unittest.TestCase):
         frames = [frame(i / 3, TextObservation("https://hddj008.com", 0.9),
                         TextObservation("我的衣服", 0.9)) for i in range(3)]
         self.assertEqual([entry.text for entry in build_subtitles(frames)], ["我的衣服"])
+        cropped_domain = [frame(i / 3, TextObservation("hddj31.co", 0.9),
+                                TextObservation("我的衣服", 0.9)) for i in range(3)]
+        self.assertEqual([entry.text for entry in build_subtitles(cropped_domain)], ["我的衣服"])
 
     def test_configured_watermark_term_is_removed(self) -> None:
         frames = [frame(i / 3, TextObservation("红豆短剧", 0.9),
                         TextObservation("我的衣服", 0.9)) for i in range(3)]
         config = BuilderConfig(watermark_terms=("红豆",))
         self.assertEqual([entry.text for entry in build_subtitles(frames, config=config)], ["我的衣服"])
+
+    def test_recurring_moving_logo_and_ocr_fragments_are_removed(self) -> None:
+        positions = ((0.1, 0.2, 0.4, 0.25), (0.5, 0.4, 0.8, 0.45),
+                     (0.2, 0.7, 0.5, 0.75))
+        frames = []
+        for second in range(60):
+            texts = []
+            for start, box in zip((0, 20, 40), positions):
+                if start <= second < start + 8:
+                    logo = "黄豆短剧"
+                    if second == 21:
+                        logo = "黄豆短"
+                    elif second == 42:
+                        logo = "短剧"
+                    elif second == 43:
+                        logo = "豆"
+                    texts.append(TextObservation(logo, 0.9, box))
+                    texts.append(TextObservation("H", 0.99,
+                                                 (box[0] - 0.04, box[1], box[0] + 0.01, box[3])))
+                    texts.append(TextObservation("hddj31.com", 0.99,
+                                                 (box[0] + 0.04, box[3], box[2], box[3] + 0.03)))
+            if second in (2, 3):
+                texts.append(TextObservation("黄豆高中", 0.95, (0.2, 0.8, 0.8, 0.86)))
+            if second in (22, 23):
+                texts.append(TextObservation("学校举荐", 0.95, (0.2, 0.8, 0.8, 0.86)))
+            frames.append(frame(float(second), *texts))
+        self.assertEqual([entry.text for entry in build_subtitles(frames, sample_fps=1)],
+                         ["黄豆高中", "学校举荐"])
+        cleaned = remove_watermarks(frames, sample_fps=1)
+        self.assertFalse(any(item.text == "H" for frame_item in cleaned for item in frame_item.texts))
+        self.assertEqual([entry.text for entry in build_subtitles(cleaned, sample_fps=1)],
+                         ["黄豆高中", "学校举荐"])
+
+    def test_rejects_low_confidence_full_crop_detection(self) -> None:
+        bad = RecognizedText("中短剧", 0.75,
+                             TextBox(((0, 0), (200, 0), (200, 100), (0, 100)), 0.75))
+        partial = RecognizedText("1", 0.62,
+                                 TextBox(((80, 0), (200, 0), (200, 100), (80, 100)), 0.62))
+        good = RecognizedText("校长", 0.98,
+                              TextBox(((50, 60), (150, 60), (150, 80), (50, 80)), 0.98))
+        self.assertEqual([item.text for item in frame_from_ocr(1, 200, 100, [bad, partial, good]).texts],
+                         ["校长"])
 
 
 if __name__ == "__main__":

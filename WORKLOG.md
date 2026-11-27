@@ -5,6 +5,24 @@ Tệp này giúp phiên làm việc trên máy khác tiếp tục từ kết qu�
 `git status` và mã nguồn hiện tại. Video mẫu là dữ liệu cục bộ ngoài repository;
 SRT thử nằm trong `output/` cục bộ và không có trên Git.
 
+## 28-11-2026 — Đóng gói các thay đổi Windows CLI và bộ lọc logo
+
+- Thêm `run-cli.bat` để khởi động CLI bằng `.venv` trên Windows; CLI hỏi đường dẫn đầu vào khi chạy tương tác mà không có `--input`.
+- Đưa các thay đổi bộ lọc logo, kiểm thử và README của ngày 27-11 vào Git. Chạy lại `python -m unittest discover -s tests` trong `.venv` trên Windows: 89 kiểm thử qua; `git diff --check` không báo lỗi.
+- Chưa kiểm thử thay đổi trên Linux/NVIDIA; chưa xác minh lại kết quả OCR với video mới.
+
+## 27-11-2026 — Lọc logo trang web khỏi phụ đề video 3
+
+- `core/srt_builder.py`: học tên logo xuất hiện nhiều đợt cạnh URL hoặc biểu tượng một ký tự, lọc các biến thể OCR của tên này trước khi tách ngôn ngữ; bỏ hộp OCR kém tin cậy phủ gần hết vùng cắt. `core/captions.py`: bỏ nhãn ngắn nằm cạnh URL trong vùng chú thích/tin nhắn. Giữ câu thoại lặp lại khi không có dấu hiệu logo.
+- Chạy `python -m unittest discover -s tests` trong `.venv` trên Windows: 89 kiểm thử qua. OCR lại toàn bộ `3.mp4` trên CPU ở 3 FPS: đầu ra chỉ còn `3.zh.srt` với 14 mục, không còn tên logo/URL/ký tự logo; đã đối chiếu ảnh các cảnh 00:10 và 00:57. Bản cũ có 37 mục tiếng Trung, nhiều mục là logo.
+- Giới hạn: bộ lọc lặp cần thấy tên trang cùng URL hoặc biểu tượng; logo khác không có hai dấu hiệu này có thể cần `--watermark-term`. Chưa kiểm thử thay đổi trên Linux/NVIDIA. `git fetch origin main` trên máy này lỗi chứng thực Windows, nên chưa xác nhận trạng thái remote mới nhất.
+
+## 27-11-2026 — Sắp xếp lại README
+
+- Gom hướng dẫn thành hai phần: cài đặt và chạy app/cấu hình khi chạy; thay đường dẫn máy cũ bằng lệnh chạy từ thư mục dự án. Giữ hướng dẫn CLI mới.
+- Đối chiếu lệnh và biến môi trường với script, `app.py`, `cli.py`; `git diff --check` không có lỗi khoảng trắng.
+- Đã chạy `python -m unittest discover -s tests` trong `.venv` trên Windows: 86 kiểm thử qua. Chưa thử lại các lệnh cài đặt trên Linux/VPS.
+
 ## 27-11-2026 — Sửa cảnh báo chuỗi thoát trong `cli.py`
 
 - Docstring của `_clean_path` chứa `C:\Videos\a.mp4`; đổi sang chuỗi thô `r"""` để

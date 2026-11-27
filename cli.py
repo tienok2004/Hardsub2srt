@@ -54,7 +54,7 @@ def _load_settings(path: Path) -> dict:
 
 def _options() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Trích phụ đề cứng từ video thành SRT")
-    parser.add_argument("--input", required=True, type=_clean_path, help="Tệp video hoặc thư mục đầu vào")
+    parser.add_argument("--input", type=_clean_path, help="Tệp video hoặc thư mục đầu vào")
     parser.add_argument("--output", type=_clean_path, help="Thư mục lưu SRT")
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config.yaml"))
     parser.add_argument("--lang", choices=("auto", "ch", "vi", "ja", "en"))
@@ -74,7 +74,18 @@ def _options() -> argparse.Namespace:
                         help="Chú thích và tin nhắn trên màn hình: gộp vào SRT, tệp riêng, hoặc bỏ qua")
     parser.add_argument("--ffmpeg")
     parser.add_argument("--ffprobe")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.input is None:
+        if not sys.stdin.isatty():
+            parser.error("cần --input khi chạy không tương tác")
+        try:
+            value = input("Đường dẫn video hoặc thư mục đầu vào: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            parser.exit(1, "\nĐã hủy.\n")
+        if not value:
+            parser.error("đường dẫn đầu vào không được để trống")
+        args.input = _clean_path(value)
+    return args
 
 
 def main() -> int:
