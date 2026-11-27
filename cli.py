@@ -28,7 +28,7 @@ def _setting(cli_value, config_value):
 
 
 def _clean_path(value: str) -> Path:
-    """Accept pasted paths such as "C:\Videos\a.mp4" with stray quotes."""
+    r"""Accept pasted paths such as "C:\Videos\a.mp4" with stray quotes."""
     return Path(clean_path_text(value))
 
 

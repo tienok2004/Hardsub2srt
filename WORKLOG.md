@@ -5,6 +5,14 @@ Tệp này giúp phiên làm việc trên máy khác tiếp tục từ kết qu�
 `git status` và mã nguồn hiện tại. Video mẫu là dữ liệu cục bộ ngoài repository;
 SRT thử nằm trong `output/` cục bộ và không có trên Git.
 
+## 27-11-2026 — Sửa cảnh báo chuỗi thoát trong `cli.py`
+
+- Docstring của `_clean_path` chứa `C:\Videos\a.mp4`; đổi sang chuỗi thô `r"""` để
+  Python 3.12+ không báo `SyntaxWarning: invalid escape sequence`.
+- Đã chạy `python -m unittest discover -s tests` trong `.venv` trên Windows: 81
+  kiểm thử qua, 5 kiểm thử ROI/OCR bị bỏ qua vì máy này chưa có FFmpeg cục bộ
+  (`.tools/`). Cần cài FFmpeg để chạy đủ 86 kiểm thử.
+
 ## 26-11-2026 — OCR chữ trong cảnh và tách ngôn ngữ (`a288e5d`)
 
 - `core/captions.py` và `core/pipeline.py`: quét tin nhắn trên điện thoại ở vùng
